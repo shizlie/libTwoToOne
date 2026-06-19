@@ -1758,7 +1758,13 @@ async function cmdCreateRoom(args) {
   const result = await createRoom(workerUrl, roomId, card, joinSecret);
   if (!result.ok)
     die(`create-room failed: [${result.error}] ${result.detail}${result.hint ? " — " + result.hint : ""}`);
+  const joined = await joinRoom(result.room_url, roomId, joinSecret, card, identity.secretBytes);
+  if (!joined.ok) {
+    die(`create-room: room created but owner auto-join failed: [${joined.error}] ${joined.detail}${joined.hint ? " — " + joined.hint : ""}`);
+  }
+  upsertRoom(roomId, { url: result.room_url, token: joined.token, participant_id: joined.participant_id }, home);
   ok(`Room created: ${result.room_url}`);
+  ok(`Joined as owner: ${joined.participant_id}`);
   ok(`Invite:       ${result.invite}`);
   ok(`Room pubkey:  ${result.room_pubkey}`);
   ok(`

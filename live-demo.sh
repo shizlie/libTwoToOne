@@ -93,8 +93,9 @@ chmod +x "$LIVE/bin/mesh"
 # ── owner / human ────────────────────────────────────────────────────────────────
 export MESH_HOME="$LIVE/harry"
 $MESH keygen --id harry@hcproduct >/dev/null
+# create-room now auto-joins the owner locally (issues + stores the token); we only
+# parse the invite here so the agents below can join with it.
 INVITE="$($MESH create-room "$ROOM_ID" --owner harry@hcproduct --url "$ROOM_URL" | awk '/Invite:/{print $NF}')"
-$MESH join "$ROOM_URL/v1/rooms/$ROOM_ID" "$INVITE" >/dev/null
 echo "Owner harry@hcproduct created room $ROOM_ID"
 
 # Locate an agent operating-contract markdown: repo examples in repo mode, else the
@@ -171,7 +172,7 @@ tmux new-session  -d -s "$SESSION" -x 200 -y 50
 tmux split-window -t "$SESSION:0.0" -v
 tmux split-window -t "$SESSION:0.1" -v
 tmux select-layout -t "$SESSION:0" even-vertical
-tmux send-keys -t "$SESSION:0.2" "MESH_HOME='$LIVE/harry' $MESH log -f" Enter
+tmux send-keys -t "$SESSION:0.2" "MESH_HOME='$LIVE/harry' $MESH log -f --room $ROOM_ID" Enter
 
 # Launch both live Claude agents and accept the folder-trust prompt.
 tmux send-keys -t "$SESSION:0.0" "bash $LIVE/launch-hermes.sh" Enter
@@ -200,10 +201,10 @@ Watch it:   tmux attach -t $SESSION
             (pane 0 = router agent, pane 1 = worker agent, pane 2 = room log)
 
 Trigger it (this is the whole demo — one human sentence):
-  MESH_HOME=$LIVE/harry $MESH post "I need a homepage"
+  MESH_HOME=$LIVE/harry $MESH post --room $ROOM_ID "I need a homepage"
 
 Then the router announces, the worker claims + builds + delivers. Accept it:
-  MESH_HOME=$LIVE/harry $MESH accept homepage --body "ship it"
+  MESH_HOME=$LIVE/harry $MESH accept homepage --room $ROOM_ID --body "ship it"
 
 Tear down:  bash $0 --clean
 ────────────────────────────────────────────────────────────────────
@@ -211,5 +212,5 @@ EOF
 
 if [[ -n "$FIRE" ]]; then
   echo "Firing the trigger: \"I need a homepage\""
-  MESH_HOME="$LIVE/harry" $MESH post "I need a homepage"
+  MESH_HOME="$LIVE/harry" $MESH post --room $ROOM_ID "I need a homepage"
 fi

@@ -6,11 +6,13 @@ binary, nothing to compile.
 ## Install / update
 
 ```sh
-bun add -g github:shizlie/libTwoToOne        # or: npm i -g github:shizlie/libTwoToOne
+bun add -g github:shizlie/libTwoToOne#v1.1.0-6ba5e5a    # pinned to this exact build — always fresh
 ```
 
-This puts `mesh` and `meshl` on your PATH. Re-run to update — if it still looks stale, run
-`bun pm cache rm` first (Bun caches global git installs).
+The pinned `#v1.1.0-6ba5e5a` tag is the reliable form: `bun add -g github:shizlie/libTwoToOne` (no ref) can
+serve a STALE cached build because Bun caches git ref→commit lookups. If you use the unpinned
+form and it looks stale, run `bun pm cache rm` and re-install, or pin the tag above. Re-run to
+update. (Add `~/.bun/bin` to your `PATH` if Bun prompts after a global add.)
 
 ## Run the live agent demo (optional)
 

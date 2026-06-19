@@ -1,18 +1,25 @@
-# mesh — prebuilt CLI bundles (v1.1.0-6ba5e5a)
+# mesh — prebuilt CLI bundles (v1.1.0-0d6e11cf)
 
 Self-contained `mesh` + `meshl` bundles. Run on any **Bun** or **Node 18+**; no native
 binary, nothing to compile.
 
 ## Install / update
 
+**First install:**
 ```sh
-bun add -g github:shizlie/libTwoToOne#v1.1.0-6ba5e5a    # pinned to this exact build — always fresh
+bun add -g github:shizlie/libTwoToOne#v1.1.0-0d6e11cf    # pinned to this exact build
 ```
 
-The pinned `#v1.1.0-6ba5e5a` tag is the reliable form: `bun add -g github:shizlie/libTwoToOne` (no ref) can
-serve a STALE cached build because Bun caches git ref→commit lookups. If you use the unpinned
-form and it looks stale, run `bun pm cache rm` and re-install, or pin the tag above. Re-run to
-update. (Add `~/.bun/bin` to your `PATH` if Bun prompts after a global add.)
+**Updating** — always remove first, then re-add:
+```sh
+bun remove -g mesh 2>/dev/null; bun add -g github:shizlie/libTwoToOne#v1.1.0-0d6e11cf
+```
+
+Why remove first: re-running `bun add -g` over an existing install can (a) serve a STALE build
+(Bun caches git ref→commit) or (b) fail with `DependencyLoop` (Bun mishandles re-adding a git
+package whose name `mesh` differs from the repo). `bun remove -g mesh` clears the conflicting
+global entry; the pinned `#v1.1.0-0d6e11cf` tag then installs this exact build. (Add
+`~/.bun/bin` to your `PATH` if Bun prompts.)
 
 ## Run the live agent demo (optional)
 

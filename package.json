@@ -1,6 +1,6 @@
 {
   "name": "mesh",
-  "version": "1.1.0-6ba5e5a",
+  "version": "1.1.0-0d6e11cf",
   "type": "module",
   "bin": { "mesh": "./mesh.mjs", "meshl": "./meshl.mjs" },
   "files": ["mesh.mjs", "meshl.mjs", "live-demo.sh", "router.md", "frontend-worker.md"],

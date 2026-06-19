@@ -28892,7 +28892,6 @@ async function cmdRun(configPath) {
   if (!roomEntry)
     die(`no token for room "${config2.room.id}" — run "mesh join" first`);
   const client = buildClient(config2, secretBytes, roomEntry.token);
-  const injector = buildInjector(config2);
   await registerWatches(client, config2);
   const stateDir = resolveHome(config2.state_dir);
   mkdirSync3(stateDir, { recursive: true, mode: 448 });
@@ -28903,6 +28902,30 @@ async function cmdRun(configPath) {
     socketPath,
     selfId: config2.identity.id
   });
+  if (config2.wake.backend === "mcp") {
+    const noopInjector = {
+      probe: async () => "idle",
+      inject: async () => {}
+    };
+    const heartbeater2 = new Heartbeater(client, noopInjector, config2.identity.id, config2.heartbeat.interval_s * 1000, (err2) => {
+      console.error("[meshl] heartbeat error:", err2);
+    });
+    heartbeater2.start();
+    const { promise: promise2, resolve: resolve2 } = Promise.withResolvers();
+    const shutdown2 = () => {
+      console.log("[meshl] stopping...");
+      resolve2();
+    };
+    process.once("SIGINT", shutdown2);
+    process.once("SIGTERM", shutdown2);
+    console.log(`[meshl] running (pull-only/mcp) — room=${config2.room.id} id=${config2.identity.id} socket=${socketPath}`);
+    await promise2;
+    await heartbeater2.stop();
+    await ipcHandle.close();
+    console.log("[meshl] stopped");
+    return;
+  }
+  const injector = buildInjector(config2);
   let consumerClient;
   let onWakeCb;
   let nudgeHandle = null;
@@ -29026,6 +29049,11 @@ async function cmdValidate(configPath) {
     }
   } catch (e) {
     fail(`room unreachable: ${config2.room.url} — ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if ((config2.wake.backend === "tmux" || config2.wake.backend === "hybrid") && !config2.wake.tmux) {
+    fail(`wake.backend "${config2.wake.backend}" requires wake.tmux (pane + adapter). For a Claude Code / MCP agent not in tmux, use backend: mcp (pull-only).`);
+  } else if (config2.wake.backend === "mcp") {
+    pass(`wake.backend mcp (pull-only — no tmux pane needed)`);
   }
   if (config2.wake.backend === "tmux" && config2.wake.tmux) {
     try {

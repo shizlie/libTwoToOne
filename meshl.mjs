@@ -14069,23 +14069,30 @@ class Consumer {
 }
 
 // src/heartbeat.ts
+function isRoomGone(err) {
+  const status = err?.status;
+  return status === 401 || status === 404;
+}
+
 class Heartbeater {
   client;
   injector;
   selfId;
   intervalMs;
   onError;
+  onFatal;
   _stopRequested = false;
   _wakeUp = null;
   _loopPromise = null;
   constructor(client, injector, selfId, intervalMs, onError = (e) => {
     console.error("[heartbeat] tick error:", e);
-  }) {
+  }, onFatal = () => {}) {
     this.client = client;
     this.injector = injector;
     this.selfId = selfId;
     this.intervalMs = intervalMs;
     this.onError = onError;
+    this.onFatal = onFatal;
   }
   start() {
     if (this._loopPromise !== null)
@@ -14112,7 +14119,16 @@ class Heartbeater {
       await this._sleep(this.intervalMs);
       if (this._stopRequested)
         break;
-      await this._tick().catch(this.onError);
+      try {
+        await this._tick();
+      } catch (err) {
+        if (isRoomGone(err)) {
+          this._stopRequested = true;
+          this.onFatal(err);
+          break;
+        }
+        this.onError(err);
+      }
     }
   }
   async _tick() {
@@ -15295,7 +15311,7 @@ class MeshClient {
   async getState() {
     const res = await this._get("/state");
     if (!res.ok)
-      throw new Error(`GET /state failed: ${res.status}`);
+      throw Object.assign(new Error(`GET /state failed: ${res.status}`), { status: res.status });
     return res.json();
   }
   async getSnapshot() {
@@ -15329,7 +15345,7 @@ class MeshClient {
   async getWatches() {
     const res = await this._get("/watches");
     if (!res.ok)
-      throw new Error(`GET /watches failed: ${res.status}`);
+      throw Object.assign(new Error(`GET /watches failed: ${res.status}`), { status: res.status });
     return res.json();
   }
   async deleteWatch(id) {
@@ -29170,9 +29186,17 @@ async function cmdRun(configPath, opts) {
     busyRetryS: config2.wake.tmux?.busy_retry_s,
     maxBusyWaitS: config2.wake.tmux?.max_busy_wait_s
   }) === "injected") : null;
+  const onRoomGone = (err2) => {
+    const reason = err2 instanceof Error ? err2.message : String(err2);
+    console.error(`[meshl] room "${config2.room.id}" is gone or your membership was revoked (${reason}) — stopping daemon.`);
+    console.error(`[meshl] forget it locally with: mesh room rm ${config2.room.id}`);
+    consumer.stop();
+    nudgeHandle?.stop();
+    dutyHandle?.stop();
+  };
   const heartbeater = new Heartbeater(client, injector, config2.identity.id, config2.heartbeat.interval_s * 1000, (err2) => {
     console.error("[meshl] heartbeat error:", err2);
-  });
+  }, onRoomGone);
   heartbeater.start();
   const shutdown = () => {
     console.log("[meshl] stopping...");

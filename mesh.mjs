@@ -1228,7 +1228,7 @@ class MeshClient {
   async getState() {
     const res = await this._get("/state");
     if (!res.ok)
-      throw new Error(`GET /state failed: ${res.status}`);
+      throw Object.assign(new Error(`GET /state failed: ${res.status}`), { status: res.status });
     return res.json();
   }
   async getSnapshot() {
@@ -1262,7 +1262,7 @@ class MeshClient {
   async getWatches() {
     const res = await this._get("/watches");
     if (!res.ok)
-      throw new Error(`GET /watches failed: ${res.status}`);
+      throw Object.assign(new Error(`GET /watches failed: ${res.status}`), { status: res.status });
     return res.json();
   }
   async deleteWatch(id) {

@@ -29012,6 +29012,14 @@ function die(msg) {
 `);
   process.exit(1);
 }
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
 function loadSecretBytes(config2) {
   const keyPath = resolveHome(config2.identity.key);
   if (!existsSync3(keyPath))
@@ -29065,6 +29073,21 @@ async function cmdRun(configPath, opts) {
   const stateDir = resolveHome(config2.state_dir);
   mkdirSync3(stateDir, { recursive: true, mode: 448 });
   if (!opts.foreground && process.env["MESHL_DETACHED"] !== "1") {
+    const pidPath = join3(stateDir, "daemon.pid");
+    if (existsSync3(pidPath)) {
+      const existing = parseInt(readFileSync5(pidPath, "utf8").trim(), 10);
+      if (Number.isInteger(existing) && pidAlive(existing)) {
+        if (!opts.force) {
+          die(`meshl already running for this config (pid ${existing}, room ${config2.room.id}).
+` + `Stop it first:  meshl stop --config ${configPath}
+` + `Or replace it:  meshl run --config ${configPath} --force`);
+        }
+        try {
+          process.kill(existing, "SIGTERM");
+        } catch {}
+        console.log(`[meshl] replacing running daemon (pid ${existing})`);
+      }
+    }
     const logPath = join3(stateDir, "daemon.log");
     const out = openSync(logPath, "a");
     const child = spawn(process.execPath, [process.argv[1], "run", "--config", configPath, "--foreground"], {
@@ -29072,7 +29095,7 @@ async function cmdRun(configPath, opts) {
       stdio: ["ignore", out, out],
       env: { ...process.env, MESHL_DETACHED: "1" }
     });
-    writeFileSync2(join3(stateDir, "daemon.pid"), `${child.pid}
+    writeFileSync2(pidPath, `${child.pid}
 `, { mode: 384 });
     child.unref();
     console.log(`meshl daemon started — pid ${child.pid}, room ${config2.room.id}`);
@@ -29210,6 +29233,12 @@ async function cmdRun(configPath, opts) {
   await consumer.start();
   await heartbeater.stop();
   await ipcHandle.close();
+  try {
+    const pidPath = join3(stateDir, "daemon.pid");
+    if (existsSync3(pidPath) && parseInt(readFileSync5(pidPath, "utf8").trim(), 10) === process.pid) {
+      rmSync2(pidPath, { force: true });
+    }
+  } catch {}
   console.log("[meshl] stopped");
 }
 async function cmdMcp(stateDir) {
@@ -29413,8 +29442,10 @@ function usage() {
   process.stdout.write(`meshl — mesh listener daemon + MCP shim
 
 Commands:
-  run --config <path> [--foreground]   Start the daemon. Detaches to the background by default
-                                       (logs → <state_dir>/daemon.log); --foreground/-f stays attached.
+  run --config <path> [--foreground] [--force]
+                                       Start the daemon. Detaches to the background by default
+                                       (logs → <state_dir>/daemon.log); --foreground/-f stays attached;
+                                       refuses if one is already running for this config (--force replaces it).
   stop --config <path>                 Stop the background daemon (SIGTERM via <state_dir>/daemon.pid).
   status --config <path>               Show room, wake cursor, queue depth, hook state, probe.
   poke   --config <path>               Force-inject an inbox hint into the pane now (manual wake;
@@ -29500,7 +29531,7 @@ try {
   } else {
     const configPath = flag(rest, "--config") ?? "mesh.yml";
     if (cmd === "run") {
-      await cmdRun(configPath, { foreground: hasFlag(rest, "--foreground") || hasFlag(rest, "-f") });
+      await cmdRun(configPath, { foreground: hasFlag(rest, "--foreground") || hasFlag(rest, "-f"), force: hasFlag(rest, "--force") });
     } else if (cmd === "stop") {
       await cmdStop(configPath);
     } else if (cmd === "validate") {

@@ -2460,8 +2460,12 @@ async function main() {
     case undefined:
       usage();
       break;
-    default:
+    default: {
+      const roomSubs = ["rm", "delete", "list", "create", "join", "remove", "forget"];
+      if (cmd && roomSubs.includes(cmd))
+        die(`Unknown command: ${cmd}. Did you mean "mesh room ${cmd}"?`);
       die(`Unknown command: ${cmd}. Run "mesh help" for usage.`);
+    }
   }
 }
 main().catch((err2) => {

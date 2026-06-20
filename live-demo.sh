@@ -11,7 +11,7 @@
 #   you            `mesh accept homepage` → DONE
 #
 # Every claim/build/deliver is the agent's OWN decision, driven by its operating
-# contract (examples/agent-prompts/{router,frontend-worker}.md loaded as CLAUDE.md)
+# contract (examples/agent-prompts/{router,frontend}.md loaded as CLAUDE.md)
 # and triggered purely by the listener daemon injecting into its live tmux pane.
 #
 # Requirements on this machine: tmux, bun, and a logged-in `claude` (Claude Max /
@@ -166,7 +166,7 @@ EOF
 }
 
 setup_agent hermes@router   routing  router.md          request  "$SESSION:0.0"
-setup_agent webby@frontend  frontend frontend-worker.md announce "$SESSION:0.1"
+setup_agent webby@frontend  frontend frontend.md        announce "$SESSION:0.1"
 
 # ── tmux stage: router pane | worker pane | live log feed ────────────────────────
 tmux kill-session -t "$SESSION" 2>/dev/null || true

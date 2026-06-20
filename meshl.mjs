@@ -13581,7 +13581,7 @@ var require_dist = __commonJS((exports, module) => {
 });
 
 // src/main.ts
-import { readFileSync as readFileSync4, existsSync as existsSync3 } from "node:fs";
+import { readFileSync as readFileSync5, existsSync as existsSync3 } from "node:fs";
 import { mkdirSync as mkdirSync3, openSync, writeFileSync as writeFileSync2, rmSync as rmSync2 } from "node:fs";
 import { join as join3, resolve } from "node:path";
 import { homedir as homedir2 } from "node:os";
@@ -13746,6 +13746,11 @@ function parseWake(r) {
     max_digest_events: r["max_digest_events"],
     backend
   };
+  if (r["hook_busy_stale_s"] !== undefined) {
+    if (typeof r["hook_busy_stale_s"] !== "number")
+      throw new ConfigError("wake.hook_busy_stale_s must be a number");
+    out.hook_busy_stale_s = r["hook_busy_stale_s"];
+  }
   if (r["tmux"] !== undefined) {
     if (!isObj(r["tmux"]))
       throw new ConfigError("wake.tmux must be a mapping");
@@ -14147,6 +14152,10 @@ function runTmux(args) {
 function runTmuxSilent(args) {
   return runTmux(args).catch(() => null);
 }
+async function paneExists(pane) {
+  const id = await runTmuxSilent(["display", "-p", "-t", pane, "#{pane_id}"]);
+  return id !== null && id.trim() !== "";
+}
 function sleep(ms) {
   const { promise, resolve } = Promise.withResolvers();
   setTimeout(resolve, ms);
@@ -14165,8 +14174,7 @@ class TmuxInjector {
   async probe() {
     const { pane, idlePromptRegex, busyMarkerRegex } = this.opts;
     const scanLines = this.opts.scanLines ?? 6;
-    const paneId = await runTmuxSilent(["display", "-p", "-t", pane, "#{pane_id}"]);
-    if (paneId === null || paneId.trim() === "")
+    if (!await paneExists(pane))
       return "gone";
     const cap1 = await runTmuxSilent(["capture-pane", "-p", "-t", pane]);
     if (cap1 === null)
@@ -14176,8 +14184,9 @@ class TmuxInjector {
     if (cap2 === null)
       return "gone";
     const tail = nonEmptyLines(cap2).slice(-scanLines).map((l) => l.trim());
-    if (busyMarkerRegex && tail.some((l) => busyMarkerRegex.test(l)))
-      return "busy";
+    if (busyMarkerRegex) {
+      return tail.some((l) => busyMarkerRegex.test(l)) ? "busy" : "idle";
+    }
     const stable = nonEmptyLines(cap1).slice(-3).join(`
 `) === nonEmptyLines(cap2).slice(-3).join(`
 `);
@@ -14225,6 +14234,54 @@ function createClaudeCodeInjector(opts) {
 var OMP_IDLE_REGEX = /^[❯>]\s*$/;
 function createOmpInjector(opts) {
   return new TmuxInjector({ ...opts, idlePromptRegex: OMP_IDLE_REGEX });
+}
+
+// src/injectors/state.ts
+import { statSync, readFileSync as readFileSync3 } from "node:fs";
+var AGENT_STATE_FILE = "agent_state";
+function readHookState(file, busyStaleMs) {
+  let raw;
+  try {
+    raw = readFileSync3(file, "utf8").trim();
+  } catch {
+    return null;
+  }
+  if (raw === "idle")
+    return "idle";
+  if (raw !== "busy")
+    return null;
+  try {
+    const ageMs = Date.now() - statSync(file).mtimeMs;
+    return ageMs <= busyStaleMs ? "busy" : null;
+  } catch {
+    return null;
+  }
+}
+
+class HookStateInjector {
+  inner;
+  pane;
+  stateFile;
+  busyStaleMs;
+  paneExistsFn;
+  constructor(inner, pane, stateFile, busyStaleMs, paneExistsFn = paneExists) {
+    this.inner = inner;
+    this.pane = pane;
+    this.stateFile = stateFile;
+    this.busyStaleMs = busyStaleMs;
+    this.paneExistsFn = paneExistsFn;
+  }
+  async probe() {
+    if (!await this.paneExistsFn(this.pane))
+      return "gone";
+    const hook = readHookState(this.stateFile, this.busyStaleMs);
+    if (hook !== null)
+      return hook;
+    return this.inner.probe();
+  }
+  inject(line) {
+    return this.inner.inject(line);
+  }
 }
 
 // ../../node_modules/@noble/ed25519/index.js
@@ -15356,7 +15413,7 @@ class MeshClient {
 
 // src/ipc.ts
 import { createServer } from "node:net";
-import { existsSync as existsSync2, unlinkSync, statSync, chmodSync as chmodSync2 } from "node:fs";
+import { existsSync as existsSync2, unlinkSync, statSync as statSync2, chmodSync as chmodSync2 } from "node:fs";
 function startIpcServer(opts) {
   const { client, socketPath, selfId } = opts;
   if (existsSync2(socketPath)) {
@@ -15400,7 +15457,7 @@ function startIpcServer(opts) {
       abortServer(`chmod 0600 failed: ${String(err2)}`);
       return;
     }
-    const mode = statSync(socketPath).mode & 511;
+    const mode = statSync2(socketPath).mode & 511;
     if ((mode & 63) !== 0) {
       abortServer(`socket mode is ${mode.toString(8)}, expected 0600 — aborting`);
       return;
@@ -28849,7 +28906,7 @@ function loadSecretBytes(config2) {
   const keyPath = resolveHome(config2.identity.key);
   if (!existsSync3(keyPath))
     die(`identity key not found: ${keyPath}`);
-  const identityFile = JSON.parse(readFileSync4(keyPath, "utf8"));
+  const identityFile = JSON.parse(readFileSync5(keyPath, "utf8"));
   const secretBytes = new Uint8Array(Buffer.from(identityFile.secret, "base64"));
   return { secretBytes, identityFile };
 }
@@ -28945,7 +29002,8 @@ async function cmdRun(configPath, opts) {
     console.log("[meshl] stopped");
     return;
   }
-  const injector = buildInjector(config2);
+  const rawInjector = buildInjector(config2);
+  const injector = config2.wake.tmux ? new HookStateInjector(rawInjector, config2.wake.tmux.pane, join3(stateDir, AGENT_STATE_FILE), (config2.wake.hook_busy_stale_s ?? 900) * 1000) : rawInjector;
   let consumerClient;
   let onWakeCb;
   let nudgeHandle = null;
@@ -29038,7 +29096,7 @@ async function cmdStop(configPath) {
   if (!existsSync3(pidPath)) {
     die(`no daemon.pid in ${stateDir} — daemon not running? (start: meshl run --config ${configPath})`);
   }
-  const pid = parseInt(readFileSync4(pidPath, "utf8").trim(), 10);
+  const pid = parseInt(readFileSync5(pidPath, "utf8").trim(), 10);
   if (!Number.isInteger(pid))
     die(`invalid pid in ${pidPath}`);
   try {
@@ -29136,7 +29194,7 @@ async function cmdStatus(configPath) {
   let cursorSeq = "none";
   if (existsSync3(cursorPath)) {
     try {
-      const raw = JSON.parse(readFileSync4(cursorPath, "utf8"));
+      const raw = JSON.parse(readFileSync5(cursorPath, "utf8"));
       cursorSeq = String(raw.seq);
     } catch {
       cursorSeq = "unreadable";
@@ -29159,7 +29217,8 @@ async function cmdStatus(configPath) {
   let probeState = "n/a";
   if (config2.wake.backend === "tmux" && config2.wake.tmux) {
     try {
-      const injector = buildInjector(config2);
+      const rawInjector = buildInjector(config2);
+      const injector = config2.wake.tmux ? new HookStateInjector(rawInjector, config2.wake.tmux.pane, join3(stateDir, AGENT_STATE_FILE), (config2.wake.hook_busy_stale_s ?? 900) * 1000) : rawInjector;
       probeState = await injector.probe();
     } catch (e) {
       probeState = `error: ${e instanceof Error ? e.message : String(e)}`;
@@ -29185,9 +29244,30 @@ Commands:
   status --config <path>               Show room, wake cursor, queue depth, probe.
   validate --config <path>             Check config, identity key, room reachability, wake wiring.
   mcp --state-dir <dir>                Run the stdio MCP shim (proxies to a running daemon's socket).
+  hooks --state-dir <dir>              Print Claude Code hook config that stamps idle/busy state
+                                       (the robust wake signal; merge into .claude/settings.json).
   help                                 Show this help.
 
 wake.backend (in mesh.yml):  tmux (push into a pane) | mcp (pull-only, no tmux) | hybrid (both).
+`);
+}
+function cmdHooks(stateDir) {
+  const file = join3(stateDir, AGENT_STATE_FILE);
+  const busy = `mkdir -p ${stateDir} && printf busy > ${file}`;
+  const idle = `mkdir -p ${stateDir} && printf idle > ${file}`;
+  const snippet = {
+    hooks: {
+      UserPromptSubmit: [{ hooks: [{ type: "command", command: busy }] }],
+      PreToolUse: [{ hooks: [{ type: "command", command: busy }] }],
+      PostToolUse: [{ hooks: [{ type: "command", command: busy }] }],
+      Stop: [{ hooks: [{ type: "command", command: idle }] }]
+    }
+  };
+  process.stderr.write(`# Claude Code hooks: merge into the agent's .claude/settings.json (or pipe stdout to it).
+` + `# They stamp idle/busy into ${file} so the meshl listener wakes the agent reliably without
+` + `# scraping the terminal. Other runtimes: run the same printf on turn start/end.
+`);
+  process.stdout.write(JSON.stringify(snippet, null, 2) + `
 `);
 }
 var argv = process.argv.slice(2);
@@ -29203,6 +29283,11 @@ try {
     if (!stateDir)
       die("usage: meshl mcp --state-dir <dir>");
     await cmdMcp(resolveHome(stateDir));
+  } else if (cmd === "hooks") {
+    const stateDir = flag(rest, "--state-dir");
+    if (!stateDir)
+      die("usage: meshl hooks --state-dir <dir>");
+    cmdHooks(resolveHome(stateDir));
   } else {
     const configPath = flag(rest, "--config") ?? "mesh.yml";
     if (cmd === "run") {

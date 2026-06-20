@@ -13751,6 +13751,11 @@ function parseWake(r) {
       throw new ConfigError("wake.hook_busy_stale_s must be a number");
     out.hook_busy_stale_s = r["hook_busy_stale_s"];
   }
+  if (r["duty_poll_interval_s"] !== undefined) {
+    if (typeof r["duty_poll_interval_s"] !== "number")
+      throw new ConfigError("wake.duty_poll_interval_s must be a number");
+    out.duty_poll_interval_s = r["duty_poll_interval_s"];
+  }
   if (r["tmux"] !== undefined) {
     if (!isObj(r["tmux"]))
       throw new ConfigError("wake.tmux must be a mapping");
@@ -28886,6 +28891,88 @@ function startNudgeLoop(checkInbox, pollHintMs, inject) {
   };
 }
 
+// src/duties.ts
+var DEP_SATISFIED = new Set(["DELIVERED", "DONE"]);
+function computeDuties(claims, selfId, roles) {
+  const stateByRef = new Map(claims.map((c) => [c.task_ref, c.state]));
+  const depsSatisfied = (deps) => deps.every((d) => {
+    const st = stateByRef.get(d);
+    return st !== undefined && DEP_SATISFIED.has(st);
+  });
+  const isVerdictMine = (verdictBy) => verdictBy.some((v) => v === selfId || roles.includes(v));
+  const claimable = [];
+  const verdict = [];
+  const ready = [];
+  for (const c of claims) {
+    if (c.state === "ANNOUNCED" && !c.holder && depsSatisfied(c.depends_on)) {
+      claimable.push(c.task_ref);
+    } else if (c.state === "DELIVERED" && isVerdictMine(c.verdict_by)) {
+      verdict.push(c.task_ref);
+    } else if (c.state === "CLAIMED" && c.holder === selfId && c.depends_on.length > 0 && depsSatisfied(c.depends_on)) {
+      ready.push(c.task_ref);
+    }
+  }
+  return { claimable, verdict, ready };
+}
+function dutiesSignature(d) {
+  const norm = (a) => [...a].sort().join(",");
+  return `c:${norm(d.claimable)}|v:${norm(d.verdict)}|r:${norm(d.ready)}`;
+}
+function formatDuties(d) {
+  const parts = [];
+  if (d.verdict.length)
+    parts.push(`awaiting your verdict (accept/reject): ${d.verdict.join(", ")}`);
+  if (d.ready.length)
+    parts.push(`dependencies delivered — proceed/deliver: ${d.ready.join(", ")}`);
+  if (d.claimable.length)
+    parts.push(`open to claim: ${d.claimable.join(", ")}`);
+  if (parts.length === 0)
+    return null;
+  return `[mesh] duties — ${parts.join(" · ")}. Run \`mesh inbox\`/\`mesh state\`, then claim/deliver/accept.`;
+}
+function startDutyLoop(getState, selfId, configRoles, intervalMs, inject) {
+  let active = true;
+  let lastSig = "";
+  let timer = null;
+  const schedule = () => {
+    if (!active)
+      return;
+    timer = setTimeout(() => {
+      run();
+    }, intervalMs);
+  };
+  const run = async () => {
+    if (!active)
+      return;
+    try {
+      const { claims, roster } = await getState();
+      const self = roster.find((r) => r.participant_id === selfId);
+      const roles = self ? [...new Set([...configRoles, ...self.roles])] : configRoles;
+      const duties = computeDuties(claims, selfId, roles);
+      const sig = dutiesSignature(duties);
+      if (sig !== lastSig) {
+        const line = formatDuties(duties);
+        if (line === null) {
+          lastSig = sig;
+        } else if (await inject(line)) {
+          lastSig = sig;
+        }
+      }
+    } catch {}
+    schedule();
+  };
+  schedule();
+  return {
+    stop() {
+      active = false;
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    }
+  };
+}
+
 // src/main.ts
 function resolveHome(p) {
   return p.startsWith("~/") ? join3(homedir2(), p.slice(2)) : resolve(p);
@@ -29068,6 +29155,14 @@ async function cmdRun(configPath, opts) {
     };
   }
   const consumer = new Consumer(consumerClient, config2, onWakeCb, stateDir);
+  const dutyIntervalS = config2.wake.duty_poll_interval_s ?? 60;
+  const dutyHandle = dutyIntervalS > 0 ? startDutyLoop(async () => {
+    const s = await client.getState();
+    return { claims: s.claims, roster: s.roster };
+  }, config2.identity.id, config2.subscriptions.roles ?? [], dutyIntervalS * 1000, async (line) => await injectWhenIdle(injector, line, {
+    busyRetryS: config2.wake.tmux?.busy_retry_s,
+    maxBusyWaitS: config2.wake.tmux?.max_busy_wait_s
+  }) === "injected") : null;
   const heartbeater = new Heartbeater(client, injector, config2.identity.id, config2.heartbeat.interval_s * 1000, (err2) => {
     console.error("[meshl] heartbeat error:", err2);
   });
@@ -29076,6 +29171,7 @@ async function cmdRun(configPath, opts) {
     console.log("[meshl] stopping...");
     consumer.stop();
     nudgeHandle?.stop();
+    dutyHandle?.stop();
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);

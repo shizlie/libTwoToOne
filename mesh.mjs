@@ -1001,13 +1001,15 @@ function saveIdentity(identity, home) {
   fs.writeFileSync(path.join(dir, "identity.json"), JSON.stringify(identity, null, 2) + `
 `, { encoding: "utf8", mode: 384 });
 }
-function createIdentity(id, home) {
+function createIdentity(id, home, roles) {
   const { pubkey, secret } = keygen();
   const identity = {
     id,
     pubkey,
     secret: Buffer.from(secret).toString("base64")
   };
+  if (roles && roles.length > 0)
+    identity.roles = roles;
   saveIdentity(identity, home);
   return identity;
 }
@@ -1018,7 +1020,8 @@ function loadIdentityWithSecret(home) {
   return {
     id: identity.id,
     pubkey: identity.pubkey,
-    secretBytes: new Uint8Array(Buffer.from(identity.secret, "base64"))
+    secretBytes: new Uint8Array(Buffer.from(identity.secret, "base64")),
+    roles: identity.roles ?? []
   };
 }
 function listIdentityHomes(root = os.homedir()) {
@@ -1798,10 +1801,13 @@ async function cmdKeygen(args) {
 ` + `Use --force to overwrite — but note this MINTS A NEW KEYPAIR: rooms that bound the old
 ` + `key will reject you with id_taken. To act as a different participant, use a separate MESH_HOME.`);
   }
-  const identity = createIdentity(id, home);
+  const roles = (flag(args, "roles") ?? "").split(",").map((r) => r.trim()).filter(Boolean);
+  const identity = createIdentity(id, home, roles);
   ok(`Created identity: ${identity.id}`);
   ok(`  home:   ${homeDir}`);
   ok(`  pubkey: ${identity.pubkey}`);
+  if (roles.length > 0)
+    ok(`  roles:  ${roles.join(", ")}  (asserted in the card at join → verdict authority for these role refs)`);
   ok(`To reuse this id elsewhere, COPY ${homeDir}/identity.json — never re-run keygen (that makes a new key).`);
 }
 async function cmdCreateRoom(args) {
@@ -1816,7 +1822,7 @@ async function cmdCreateRoom(args) {
     die(`No identity found. Run "mesh keygen --id ${ownerId}" first.`);
   if (identity.id !== ownerId)
     die(`Identity id "${identity.id}" does not match --owner "${ownerId}"`);
-  const card = buildCard(identity.id, identity.pubkey, identity.secretBytes);
+  const card = buildCard(identity.id, identity.pubkey, identity.secretBytes, { roles: identity.roles });
   const joinSecret = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex");
   const result = await createRoom(workerUrl, roomId, card, joinSecret);
   if (!result.ok)
@@ -1868,7 +1874,7 @@ async function cmdJoin(args) {
   const identity = loadIdentityWithSecret(home);
   if (!identity)
     die('No identity found. Run "mesh keygen --id <id>" first.');
-  const card = buildCard(identity.id, identity.pubkey, identity.secretBytes);
+  const card = buildCard(identity.id, identity.pubkey, identity.secretBytes, { roles: identity.roles });
   const result = await joinRoom(roomUrl, roomId, joinSecret, card, identity.secretBytes);
   if (!result.ok) {
     if (result.error === "id_taken")
@@ -2171,7 +2177,7 @@ async function cmdState(args) {
   ok("");
   ok("Roster:");
   for (const p of state.roster) {
-    ok(`  ${p.id}  [${p.roles.join(", ")}]`);
+    ok(`  ${p.participant_id}  [${p.roles.join(", ")}]`);
   }
 }
 async function cmdWatch(args) {
@@ -2223,6 +2229,8 @@ async function cmdWhoami(args) {
   const h2 = home ?? meshHome();
   ok(`id:     ${identity.id}`);
   ok(`pubkey: ${identity.pubkey}`);
+  if (identity.roles && identity.roles.length > 0)
+    ok(`roles:  ${identity.roles.join(", ")}`);
   ok(`home:   ${h2}  (config dir — set MESH_HOME or --home to change)`);
   ok(`        holds identity.json · rooms.json · active_room`);
   const rooms = loadRooms(home);
@@ -2269,7 +2277,7 @@ function usage() {
   ok(`mesh — room coordination CLI
 
 Commands:
-  keygen --id <id>                                    Generate identity
+  keygen --id <id> [--roles a,b]                      Generate identity (roles → verdict authority for role refs)
   room create <room> --owner <id> [--url <base>]      Create a room (joins you as owner)
   room join <room-url> <room>.<secret>                Join a room
   room list                                           List joined rooms (* = active)

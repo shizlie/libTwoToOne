@@ -1,9 +1,9 @@
 {
   "name": "mesh",
-  "version": "1.1.0-0d6e11cf",
+  "version": "1.1.0-55ad5f87",
   "type": "module",
   "bin": { "mesh": "./mesh.mjs", "meshl": "./meshl.mjs" },
-  "files": ["mesh.mjs", "meshl.mjs", "live-demo.sh", "router.md", "frontend-worker.md"],
+  "files": ["mesh.mjs", "meshl.mjs", "live-demo.sh", "router.md", "frontend-worker.md", "reviewer.md", "backend.md"],
   "repository": { "type": "git", "url": "git+https://github.com/shizlie/libTwoToOne.git" },
   "homepage": "https://github.com/shizlie/libTwoToOne"
 }

@@ -29051,7 +29051,7 @@ async function cmdValidate(configPath) {
     fail(`room unreachable: ${config2.room.url} — ${e instanceof Error ? e.message : String(e)}`);
   }
   if ((config2.wake.backend === "tmux" || config2.wake.backend === "hybrid") && !config2.wake.tmux) {
-    fail(`wake.backend "${config2.wake.backend}" requires wake.tmux (pane + adapter). For a Claude Code / MCP agent not in tmux, use backend: mcp (pull-only).`);
+    fail(`wake.backend "${config2.wake.backend}" needs a wake.tmux block (pane + adapter) to inject wakes into a tmux pane. If this agent does not run in a tmux pane, set backend: mcp (pull-only — it polls the room instead of being pushed to).`);
   } else if (config2.wake.backend === "mcp") {
     pass(`wake.backend mcp (pull-only — no tmux pane needed)`);
   }

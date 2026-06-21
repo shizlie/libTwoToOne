@@ -1463,7 +1463,7 @@ var DEFAULT_SENDER_MAX = 28;
 var DEFAULT_BODY_WIDTH = 80;
 function renderEntry(entry, opts) {
   const { seq, room_ts, submission } = entry;
-  const { sender, performative, task_ref, body } = submission;
+  const { sender, performative, task_ref, body, artifacts } = submission;
   const seqStr = String(seq).padStart(4, "0");
   const timeStr = fmtTime(room_ts);
   const dateStr = opts.datePrefix ? `${opts.datePrefix} ` : "";
@@ -1476,7 +1476,8 @@ function renderEntry(entry, opts) {
   const taskStr = task_ref ? ansi(C2.yellow, task_ref) + "  " : "";
   const bodyWidth = opts.bodyWidth ?? DEFAULT_BODY_WIDTH;
   const bodySnippet = body ? ansi(DIM, `"${truncate(body, bodyWidth)}"`) : "";
-  return `${seqLabel} ${dateStr}${timeLabel}  ${senderStr}  ${label}  ${taskStr}${bodySnippet}`;
+  const artStr = artifacts && artifacts.length > 0 ? `  ${ansi(C2.cyan, `→ ${artifacts.join(", ")}`)}` : "";
+  return `${seqLabel} ${dateStr}${timeLabel}  ${senderStr}  ${label}  ${taskStr}${bodySnippet}${artStr}`;
 }
 function renderEntries(entries, opts = {}) {
   if (entries.length === 0)

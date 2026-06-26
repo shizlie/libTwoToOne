@@ -9170,7 +9170,7 @@ var require_resolve = __commonJS((exports) => {
   }
   function getFullPath(resolver, id = "", normalize) {
     if (normalize !== false)
-      id = normalizeId(id);
+      id = normalizeId2(id);
     const p = resolver.parse(id);
     return _getFullPath(resolver, p);
   }
@@ -9181,12 +9181,12 @@ var require_resolve = __commonJS((exports) => {
   }
   exports._getFullPath = _getFullPath;
   var TRAILING_SLASH_HASH = /#\/?$/;
-  function normalizeId(id) {
+  function normalizeId2(id) {
     return id ? id.replace(TRAILING_SLASH_HASH, "") : "";
   }
-  exports.normalizeId = normalizeId;
+  exports.normalizeId = normalizeId2;
   function resolveUrl(resolver, baseId, id) {
-    id = normalizeId(id);
+    id = normalizeId2(id);
     return resolver.resolve(baseId, id);
   }
   exports.resolveUrl = resolveUrl;
@@ -9195,7 +9195,7 @@ var require_resolve = __commonJS((exports) => {
     if (typeof schema == "boolean")
       return {};
     const { schemaId, uriResolver } = this.opts;
-    const schId = normalizeId(schema[schemaId] || baseId);
+    const schId = normalizeId2(schema[schemaId] || baseId);
     const baseIds = { "": schId };
     const pathPrefix = getFullPath(uriResolver, schId, false);
     const localRefs = {};
@@ -9212,7 +9212,7 @@ var require_resolve = __commonJS((exports) => {
       baseIds[jsonPtr] = innerBaseId;
       function addRef(ref) {
         const _resolve = this.opts.uriResolver.resolve;
-        ref = normalizeId(innerBaseId ? _resolve(innerBaseId, ref) : ref);
+        ref = normalizeId2(innerBaseId ? _resolve(innerBaseId, ref) : ref);
         if (schemaRefs.has(ref))
           throw ambiguos(ref);
         schemaRefs.add(ref);
@@ -9221,7 +9221,7 @@ var require_resolve = __commonJS((exports) => {
           schOrRef = this.refs[schOrRef];
         if (typeof schOrRef == "object") {
           checkAmbiguosRef(sch, schOrRef.schema, ref);
-        } else if (ref !== normalizeId(fullPath)) {
+        } else if (ref !== normalizeId2(fullPath)) {
           if (ref[0] === "#") {
             checkAmbiguosRef(sch, localRefs[ref], ref);
             localRefs[ref] = sch;
@@ -9907,7 +9907,7 @@ var require_compile = __commonJS((exports) => {
     const schOrFunc = root.refs[ref];
     if (schOrFunc)
       return schOrFunc;
-    let _sch = resolve.call(this, root, ref);
+    let _sch = resolve2.call(this, root, ref);
     if (_sch === undefined) {
       const schema = (_a2 = root.localRefs) === null || _a2 === undefined ? undefined : _a2[ref];
       const { schemaId } = this.opts;
@@ -9934,7 +9934,7 @@ var require_compile = __commonJS((exports) => {
   function sameSchemaEnv(s1, s2) {
     return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
   }
-  function resolve(root, ref) {
+  function resolve2(root, ref) {
     let sch;
     while (typeof (sch = this.refs[ref]) == "string")
       ref = sch;
@@ -10520,55 +10520,55 @@ var require_fast_uri = __commonJS((exports, module) => {
     }
     return uri;
   }
-  function resolve(baseURI, relativeURI, options) {
+  function resolve2(baseURI, relativeURI, options) {
     const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
     const resolved = resolveComponent(parse6(baseURI, schemelessOptions), parse6(relativeURI, schemelessOptions), schemelessOptions, true);
     schemelessOptions.skipEscape = true;
     return serialize(resolved, schemelessOptions);
   }
-  function resolveComponent(base, relative, options, skipNormalization) {
+  function resolveComponent(base, relative2, options, skipNormalization) {
     const target = {};
     if (!skipNormalization) {
       base = parse6(serialize(base, options), options);
-      relative = parse6(serialize(relative, options), options);
+      relative2 = parse6(serialize(relative2, options), options);
     }
     options = options || {};
-    if (!options.tolerant && relative.scheme) {
-      target.scheme = relative.scheme;
-      target.userinfo = relative.userinfo;
-      target.host = relative.host;
-      target.port = relative.port;
-      target.path = removeDotSegments(relative.path || "");
-      target.query = relative.query;
+    if (!options.tolerant && relative2.scheme) {
+      target.scheme = relative2.scheme;
+      target.userinfo = relative2.userinfo;
+      target.host = relative2.host;
+      target.port = relative2.port;
+      target.path = removeDotSegments(relative2.path || "");
+      target.query = relative2.query;
     } else {
-      if (relative.userinfo !== undefined || relative.host !== undefined || relative.port !== undefined) {
-        target.userinfo = relative.userinfo;
-        target.host = relative.host;
-        target.port = relative.port;
-        target.path = removeDotSegments(relative.path || "");
-        target.query = relative.query;
+      if (relative2.userinfo !== undefined || relative2.host !== undefined || relative2.port !== undefined) {
+        target.userinfo = relative2.userinfo;
+        target.host = relative2.host;
+        target.port = relative2.port;
+        target.path = removeDotSegments(relative2.path || "");
+        target.query = relative2.query;
       } else {
-        if (!relative.path) {
+        if (!relative2.path) {
           target.path = base.path;
-          if (relative.query !== undefined) {
-            target.query = relative.query;
+          if (relative2.query !== undefined) {
+            target.query = relative2.query;
           } else {
             target.query = base.query;
           }
         } else {
-          if (relative.path[0] === "/") {
-            target.path = removeDotSegments(relative.path);
+          if (relative2.path[0] === "/") {
+            target.path = removeDotSegments(relative2.path);
           } else {
             if ((base.userinfo !== undefined || base.host !== undefined || base.port !== undefined) && !base.path) {
-              target.path = "/" + relative.path;
+              target.path = "/" + relative2.path;
             } else if (!base.path) {
-              target.path = relative.path;
+              target.path = relative2.path;
             } else {
-              target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative.path;
+              target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative2.path;
             }
             target.path = removeDotSegments(target.path);
           }
-          target.query = relative.query;
+          target.query = relative2.query;
         }
         target.userinfo = base.userinfo;
         target.host = base.host;
@@ -10576,7 +10576,7 @@ var require_fast_uri = __commonJS((exports, module) => {
       }
       target.scheme = base.scheme;
     }
-    target.fragment = relative.fragment;
+    target.fragment = relative2.fragment;
     return target;
   }
   function equal(uriA, uriB, options) {
@@ -10779,7 +10779,7 @@ var require_fast_uri = __commonJS((exports, module) => {
   var fastUri = {
     SCHEMES,
     normalize,
-    resolve,
+    resolve: resolve2,
     resolveComponent,
     equal,
     serialize,
@@ -13581,9 +13581,9 @@ var require_dist = __commonJS((exports, module) => {
 });
 
 // src/main.ts
-import { readFileSync as readFileSync5, existsSync as existsSync3, statSync as statSync3 } from "node:fs";
-import { mkdirSync as mkdirSync3, openSync, writeFileSync as writeFileSync2, rmSync as rmSync2 } from "node:fs";
-import { join as join3, resolve } from "node:path";
+import { readFileSync as readFileSync5, existsSync as existsSync4, statSync as statSync3 } from "node:fs";
+import { mkdirSync as mkdirSync3, openSync, writeFileSync as writeFileSync3, rmSync as rmSync2 } from "node:fs";
+import { join as join4, resolve as resolve2 } from "node:path";
 import { homedir as homedir2 } from "node:os";
 import { spawn } from "node:child_process";
 
@@ -15166,6 +15166,11 @@ function signSubmission(sub, secretKeyBytes) {
   const sigBytes = sign(bytes, secretKeyBytes);
   return encodeSig(sigBytes);
 }
+// ../proto/src/path.ts
+function normalizeId(path) {
+  return path.normalize("NFC").replace(/\\/g, "/").split("/").filter((s) => s.length > 0).map((s) => s.toLowerCase()).join("/");
+}
+
 // ../proto/src/performatives.ts
 var PERFORMATIVE_SET = {
   request: true,
@@ -15177,17 +15182,23 @@ var PERFORMATIVE_SET = {
   accept: true,
   reject: true,
   escalate: true,
+  "file.write": true,
+  "file.delete": true,
+  "file.lock": true,
+  "file.unlock": true,
   "system.genesis": true,
   "system.join": true,
   "system.leave": true,
-  "system.roles": true
+  "system.roles": true,
+  "system.grant": true
 };
 var ROOM_ONLY = {
   escalate: true,
   "system.genesis": true,
   "system.join": true,
   "system.leave": true,
-  "system.roles": true
+  "system.roles": true,
+  "system.grant": true
 };
 var PARTICIPANT_PERFORMATIVES = Object.keys(PERFORMATIVE_SET).filter((p) => !(p in ROOM_ONLY));
 // ../proto/src/machine.ts
@@ -15291,7 +15302,7 @@ class MeshClient {
       ok: false,
       error: body["error"] ?? "unknown_error",
       detail: body["detail"] ?? res.statusText,
-      hint: body["hint"],
+      hint: body["hint"] ?? body["tip"],
       retry_after_s: body["retry_after_s"],
       status: res.status
     };
@@ -15393,6 +15404,32 @@ class MeshClient {
       return this._err(res);
     return new Uint8Array(await res.arrayBuffer());
   }
+  async getTree(prefix) {
+    const q = prefix ? `?prefix=${encodeURIComponent(prefix)}` : "";
+    const res = await this._get(`/tree${q}`);
+    if (!res.ok)
+      return this._err(res);
+    return res.json();
+  }
+  async search(query, opts) {
+    const params = new URLSearchParams({ q: query });
+    if (opts?.prefix !== undefined)
+      params.set("prefix", opts.prefix);
+    if (opts?.limit !== undefined)
+      params.set("limit", String(opts.limit));
+    let res;
+    try {
+      res = await this._get(`/search?${params.toString()}`);
+    } catch {
+      return { ok: false, error: "search_unavailable", detail: "search host unreachable", status: 503 };
+    }
+    if (!res.ok)
+      return this._err(res);
+    return res.json();
+  }
+  async relay(path2, update) {
+    await this._post("/relay", { path: path2, update });
+  }
   static KEEPALIVE_MS = 25000;
   static RECONNECT_BASE_MS = 500;
   static RECONNECT_MAX_MS = 8000;
@@ -15476,10 +15513,464 @@ class MeshClient {
 
 // src/ipc.ts
 import { createServer } from "node:net";
-import { existsSync as existsSync2, unlinkSync, statSync as statSync2, chmodSync as chmodSync2 } from "node:fs";
+import { existsSync as existsSync3, unlinkSync, statSync as statSync2, chmodSync as chmodSync3 } from "node:fs";
+import { basename as pathBasename } from "node:path";
+
+// src/fs-shim.ts
+import * as nodePath from "node:path";
+import { writeFileSync as writeFileSync2, chmodSync as chmodSync2, existsSync as existsSync2, realpathSync } from "node:fs";
+
+// ../cli/src/fs.ts
+function resolveNode(tree, repopath) {
+  const id = normalizeId(repopath);
+  return tree.find((n) => n.path === id);
+}
+function hashFromRef(content_hash) {
+  const m = /^r2:([0-9a-f]{64})$/.exec(content_hash);
+  if (!m)
+    throw new Error(`not an r2 content ref: ${content_hash}`);
+  return m[1];
+}
+
+// src/fs-shim.ts
+function isCacheFresh(cachedHash, treeHash) {
+  return cachedHash !== undefined && cachedHash === treeHash;
+}
+var DEFAULT_MAX_BYTES = 512 * 1024 * 1024;
+var DEFAULT_IDLE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+class WorkspaceCache {
+  _client;
+  _maxBytes;
+  _idleTtlMs;
+  _entries = new Map;
+  _totalBytes = 0;
+  constructor(_rootDir, client, opts) {
+    this._client = client;
+    this._maxBytes = opts?.maxBytes ?? DEFAULT_MAX_BYTES;
+    this._idleTtlMs = opts?.idleTtlMs ?? DEFAULT_IDLE_TTL_MS;
+  }
+  async read(path2) {
+    const treeResult = await this._client.getTree(path2);
+    if (!("tree" in treeResult)) {
+      throw new Error(`WorkspaceCache.read: getTree failed for path "${path2}": ${treeResult.error}`);
+    }
+    const node = resolveNode(treeResult.tree, path2);
+    if (node === undefined) {
+      throw new Error(`WorkspaceCache.read: path "${path2}" not found in room tree`);
+    }
+    const treeHash = node.content_hash;
+    const existing = this._entries.get(path2);
+    if (isCacheFresh(existing?.hash, treeHash)) {
+      existing.atime = Date.now();
+      return existing.bytes;
+    }
+    const rawHash = hashFromRef(treeHash);
+    const blobResult = await this._client.getArtifact(rawHash);
+    if (!(blobResult instanceof Uint8Array)) {
+      throw new Error(`WorkspaceCache.read: getArtifact failed for "${path2}" (hash ${rawHash}): ${blobResult.error}`);
+    }
+    if (existing !== undefined) {
+      this._totalBytes -= existing.bytes.byteLength;
+      this._entries.delete(path2);
+    }
+    const entry = { hash: treeHash, bytes: blobResult, atime: Date.now() };
+    this._entries.set(path2, entry);
+    this._totalBytes += blobResult.byteLength;
+    this._evict();
+    return blobResult;
+  }
+  async ls(prefix) {
+    const result = await this._client.getTree(prefix);
+    if (!("tree" in result)) {
+      throw new Error(`WorkspaceCache.ls: getTree failed: ${result.error}`);
+    }
+    return result.tree;
+  }
+  async hydrate(prefix) {
+    const result = await this._client.getTree(prefix);
+    if (!("tree" in result)) {
+      throw new Error(`WorkspaceCache.hydrate: getTree failed: ${result.error}`);
+    }
+    const paths = [];
+    for (const node of result.tree) {
+      await this.read(node.path);
+      paths.push(node.path);
+    }
+    return paths;
+  }
+  _evict() {
+    const now = Date.now();
+    for (const [path2, entry] of this._entries) {
+      if (now - entry.atime > this._idleTtlMs) {
+        this._totalBytes -= entry.bytes.byteLength;
+        this._entries.delete(path2);
+      }
+    }
+    while (this._totalBytes > this._maxBytes && this._entries.size > 0) {
+      let oldestPath;
+      let oldestAtime = Infinity;
+      for (const [p, e] of this._entries) {
+        if (e.atime < oldestAtime) {
+          oldestAtime = e.atime;
+          oldestPath = p;
+        }
+      }
+      if (oldestPath === undefined)
+        break;
+      const evicted = this._entries.get(oldestPath);
+      this._totalBytes -= evicted.bytes.byteLength;
+      this._entries.delete(oldestPath);
+    }
+  }
+}
+var FIND_FAIL_LOUD = new Set([
+  "-exec",
+  "-execdir",
+  "-ok",
+  "-okdir",
+  "-delete",
+  "-ls",
+  "-fprint",
+  "-fprint0",
+  "-fprintf",
+  "-mtime",
+  "-atime",
+  "-ctime",
+  "-newer",
+  "-size",
+  "-perm",
+  "-user",
+  "-group",
+  "-uid",
+  "-gid"
+]);
+var FIND_VALUE_FLAGS = new Set([
+  "-name",
+  "-iname",
+  "-type",
+  "-maxdepth",
+  "-mindepth",
+  "-path",
+  "-ipath",
+  "-regex",
+  "-iregex",
+  "-mtime",
+  "-atime",
+  "-ctime",
+  "-newer",
+  "-size",
+  "-perm",
+  "-user",
+  "-group",
+  "-uid",
+  "-gid"
+]);
+var GREP_VALUE_FLAGS = new Set([
+  "-e",
+  "--regexp",
+  "-f",
+  "--file",
+  "-m",
+  "--max-count",
+  "-A",
+  "--after-context",
+  "-B",
+  "--before-context",
+  "-C",
+  "--context",
+  "--include",
+  "--exclude",
+  "--exclude-dir",
+  "--glob",
+  "-g",
+  "--type",
+  "-t",
+  "--iglob",
+  "--max-depth"
+]);
+function routeToolCall(argv, cwd, workspaceRoot) {
+  if (argv.length === 0)
+    return { kind: "passthrough" };
+  const tool = argv[0];
+  const args = argv.slice(1);
+  const wsRoot = nodePath.resolve(workspaceRoot);
+  function wsRel(p) {
+    const resolved = nodePath.isAbsolute(p) ? nodePath.resolve(p) : nodePath.resolve(cwd, p);
+    const inside = resolved === wsRoot || resolved.startsWith(wsRoot + nodePath.sep);
+    if (!inside)
+      return null;
+    return nodePath.relative(wsRoot, resolved);
+  }
+  if (tool === "ls" || tool === "stat") {
+    const pathArg = args.find((a) => !a.startsWith("-")) ?? cwd;
+    const rel = wsRel(pathArg);
+    if (rel === null)
+      return { kind: "passthrough" };
+    return { kind: "metadata", prefix: rel || undefined, oneLevel: true };
+  }
+  if (tool === "find") {
+    for (const a of args) {
+      if (FIND_FAIL_LOUD.has(a)) {
+        return {
+          kind: "fail_loud",
+          reason: `find ${a}: not servable from metadata — use room search or hydrate explicitly (A10)`
+        };
+      }
+    }
+    let rootArg;
+    let j = 0;
+    while (j < args.length) {
+      const a = args[j];
+      if (FIND_VALUE_FLAGS.has(a)) {
+        j += 2;
+        continue;
+      }
+      if (a.startsWith("-")) {
+        j++;
+        continue;
+      }
+      rootArg = a;
+      break;
+    }
+    const effectivePath = rootArg ?? cwd;
+    const rel = wsRel(effectivePath);
+    if (rel === null)
+      return { kind: "passthrough" };
+    let nameGlob;
+    for (let ni = 0;ni < args.length - 1; ni++) {
+      if (args[ni] === "-name" || args[ni] === "-iname") {
+        nameGlob = args[ni + 1];
+        break;
+      }
+    }
+    return { kind: "metadata", prefix: rel || undefined, ...nameGlob !== undefined ? { nameGlob } : {} };
+  }
+  if (tool === "grep" || tool === "rg" || tool === "ag") {
+    const positional = [];
+    let i = 0;
+    while (i < args.length) {
+      const a = args[i];
+      if (a === "--") {
+        i++;
+        break;
+      }
+      if (GREP_VALUE_FLAGS.has(a)) {
+        i += 2;
+        continue;
+      }
+      if (a.startsWith("-")) {
+        i++;
+        continue;
+      }
+      positional.push(a);
+      i++;
+    }
+    while (i < args.length)
+      positional.push(args[i++]);
+    const query = positional[0];
+    if (query === undefined)
+      return { kind: "passthrough" };
+    const pathArg = positional[1];
+    if (pathArg !== undefined) {
+      const rel = wsRel(pathArg);
+      if (rel === null)
+        return { kind: "passthrough" };
+      return { kind: "search", query, prefix: rel || undefined };
+    }
+    return { kind: "search", query };
+  }
+  if (tool === "cat" || tool === "head" || tool === "tail" || tool === "open" || tool === "less" || tool === "more") {
+    const READ_VALUE_FLAGS = new Set([
+      "-n",
+      "--lines",
+      "-c",
+      "--bytes",
+      "--skip-bytes"
+    ]);
+    let fileArg;
+    let ri = 0;
+    while (ri < args.length) {
+      const a = args[ri];
+      if (READ_VALUE_FLAGS.has(a)) {
+        ri += 2;
+        continue;
+      }
+      if (a.startsWith("-")) {
+        ri++;
+        continue;
+      }
+      fileArg = a;
+      break;
+    }
+    if (fileArg === undefined)
+      return { kind: "passthrough" };
+    const rel = wsRel(fileArg);
+    if (rel === null || rel === "")
+      return { kind: "passthrough" };
+    return { kind: "hydrate", path: rel };
+  }
+  return { kind: "passthrough" };
+}
+function buildExecEnv(opts) {
+  const base = opts.parentEnv ?? process.env;
+  const existingPath = base["PATH"] ?? "";
+  return {
+    ...base,
+    PATH: `${opts.binDir}${nodePath.delimiter}${existingPath}`,
+    MESH_SHIM_SOCKET: opts.socketPath,
+    MESH_SHIM_WORKSPACE: opts.workspace,
+    MESH_SHIM_BINDIR: opts.binDir
+  };
+}
+function makeShimScript(tool, socketPath, workspace) {
+  const safeSocket = JSON.stringify(socketPath);
+  const safeWs = JSON.stringify(workspace);
+  return `#!/usr/bin/env node
+// mesh shim: ${tool} — generated by installShims; DO NOT EDIT.
+// Routes IPC via daemon unix socket; passes through out-of-workspace ops.
+// Escape hatch: MESH_FS_PASSTHROUGH=1 bypasses all routing immediately.
+import { createConnection } from 'node:net';
+import { spawnSync } from 'node:child_process';
+import { join, delimiter } from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
+
+const TOOL = ${JSON.stringify(tool)};
+const SOCKET = process.env['MESH_SHIM_SOCKET'] || ${safeSocket};
+const WORKSPACE = process.env['MESH_SHIM_WORKSPACE'] || ${safeWs};
+const BIN_DIR = process.env['MESH_SHIM_BINDIR'] || '';
+
+// Recursion guard (P2): compare via realpathSync to catch symlinked PATH entries.
+function resolveRealTool() {
+  const dirs = (process.env['PATH'] || '').split(delimiter);
+  let realBinDir = BIN_DIR;
+  if (BIN_DIR) { try { realBinDir = realpathSync(BIN_DIR); } catch { realBinDir = BIN_DIR; } }
+  for (const d of dirs) {
+    if (!d) continue;
+    let realD = d;
+    try { realD = realpathSync(d); } catch { realD = d; }
+    if (BIN_DIR && realD === realBinDir) continue;
+    const p = join(d, TOOL);
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
+function execReal() {
+  const real = resolveRealTool();
+  if (!real) {
+    process.stderr.write('[mesh shim] ' + TOOL + ': cannot find real tool outside shim binDir\\n');
+    process.exit(127);
+  }
+  const r = spawnSync(real, process.argv.slice(2), { stdio: 'inherit' });
+  process.exit(r.status ?? 0);
+}
+
+// Escape hatch: MESH_FS_PASSTHROUGH=1 → bypass routing entirely.
+if (process.env['MESH_FS_PASSTHROUGH'] === '1') {
+  execReal();
+}
+
+// JSON-RPC call over the daemon's unix socket (newline-delimited).
+function rpc(method, params) {
+  return new Promise((resolve, reject) => {
+    const conn = createConnection(SOCKET);
+    let buf = '';
+    const req = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) + '\\n';
+    const timer = setTimeout(() => { conn.destroy(); reject(new Error('IPC timeout')); }, 10000);
+    conn.on('connect', () => conn.write(req));
+    conn.on('data', (chunk) => {
+      buf += chunk.toString('utf8');
+      const nl = buf.indexOf('\\n');
+      if (nl !== -1) {
+        clearTimeout(timer);
+        conn.destroy();
+        try {
+          const resp = JSON.parse(buf.slice(0, nl));
+          if (resp.error) reject(new Error(resp.error.message));
+          else resolve(resp.result);
+        } catch (e) { reject(e); }
+      }
+    });
+    conn.on('error', (err) => { clearTimeout(timer); reject(err); });
+  });
+}
+
+const argv = [TOOL, ...process.argv.slice(2)];
+const cwd = process.cwd();
+
+rpc('fs_exec', { argv, cwd, workspace: WORKSPACE }).then((result) => {
+  if (!result || typeof result !== 'object') {
+    process.stderr.write('[mesh shim] ' + TOOL + ': unexpected IPC response\\n');
+    process.exit(1);
+  }
+  switch (result.kind) {
+    case 'passthrough':
+      execReal();
+      break;
+    case 'fail_loud':
+      process.stderr.write('[mesh shim] ' + TOOL + ': ' + result.reason + '\\n');
+      process.exit(1);
+      break;
+    case 'metadata': {
+      // ls / find: one path per line.
+      // For ls (fmt === 'basename'), print only the final component (native ls semantics).
+      const nodes = Array.isArray(result.nodes) ? result.nodes : [];
+      const fmt = result.fmt;
+      if (nodes.length > 0) {
+        process.stdout.write(nodes.map(n => {
+          const p = String(n.path);
+          return fmt === 'basename' ? (p.split('/').pop() || p) : p;
+        }).join('\\n') + '\\n');
+      }
+      break;
+    }
+    case 'search': {
+      // grep: "path:snippet" per result
+      const results = Array.isArray(result.results) ? result.results : [];
+      if (results.length > 0) {
+        process.stdout.write(results.map(r => String(r.path) + ':' + String(r.snippet)).join('\\n') + '\\n');
+      }
+      break;
+    }
+    case 'hydrate': {
+      // cat: decode base64 bytes → stdout
+      const bytes = Buffer.from(String(result.bytes || ''), 'base64');
+      process.stdout.write(bytes);
+      break;
+    }
+    default:
+      process.stderr.write('[mesh shim] ' + TOOL + ': unknown result kind: ' + result.kind + '\\n');
+      process.exit(1);
+  }
+}).catch((err) => {
+  // B2: only fall back when daemon is UNREACHABLE (ECONNREFUSED/ENOENT) AND workspace is on disk.
+  // A daemon-returned error means routing FAILED — fail loud, never silently wrong (A4/R-E2).
+  const code = err && err.code;
+  const isUnreachable = code === 'ECONNREFUSED' || code === 'ENOENT';
+  if (isUnreachable && existsSync(WORKSPACE)) {
+    execReal();
+    return;
+  }
+  const msg = (err && err.message) ? err.message : String(err);
+  process.stderr.write('[mesh shim] ' + TOOL + ': ' + msg + '\\n');
+  process.exit(1);
+});
+`;
+}
+function installShims(binDir, socketPath, workspace) {
+  for (const tool of ["ls", "grep", "cat", "find"]) {
+    const script = makeShimScript(tool, socketPath, workspace);
+    const dest = nodePath.join(binDir, tool);
+    writeFileSync2(dest, script, { encoding: "utf8", mode: 493 });
+    chmodSync2(dest, 493);
+  }
+}
+
+// src/ipc.ts
 function startIpcServer(opts) {
-  const { client, socketPath, selfId } = opts;
-  if (existsSync2(socketPath)) {
+  const { client, socketPath, selfId, cache } = opts;
+  if (existsSync3(socketPath)) {
     try {
       unlinkSync(socketPath);
     } catch {}
@@ -15501,7 +15992,7 @@ function startIpcServer(opts) {
       socket.destroy();
     });
   });
-  const { promise, resolve, reject } = Promise.withResolvers();
+  const { promise, resolve: resolve2, reject } = Promise.withResolvers();
   server.on("error", (err2) => {
     reject(err2);
   });
@@ -15515,7 +16006,7 @@ function startIpcServer(opts) {
       reject(new Error(`[ipc] ${reason}`));
     }
     try {
-      chmodSync2(socketPath, 384);
+      chmodSync3(socketPath, 384);
     } catch (err2) {
       abortServer(`chmod 0600 failed: ${String(err2)}`);
       return;
@@ -15525,7 +16016,7 @@ function startIpcServer(opts) {
       abortServer(`socket mode is ${mode.toString(8)}, expected 0600 — aborting`);
       return;
     }
-    resolve({
+    resolve2({
       close() {
         return new Promise((res, rej) => {
           server.close((err2) => {
@@ -15595,6 +16086,84 @@ function startIpcServer(opts) {
         defaults: state.defaults,
         head: state.head
       };
+    }
+    if (method === "fs_ls") {
+      if (!cache)
+        throw { code: -32601, message: "fs_ls: no workspace cache configured" };
+      const prefix = typeof p["prefix"] === "string" ? p["prefix"] : undefined;
+      return cache.ls(prefix);
+    }
+    if (method === "fs_find") {
+      if (!cache)
+        throw { code: -32601, message: "fs_find: no workspace cache configured" };
+      const prefix = typeof p["prefix"] === "string" ? p["prefix"] : undefined;
+      const nameGlob = typeof p["name"] === "string" ? p["name"] : undefined;
+      const nodes = await cache.ls(prefix);
+      if (nameGlob === undefined)
+        return nodes;
+      const regexSrc = nameGlob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+      const re = new RegExp(`^${regexSrc}$`);
+      return nodes.filter((n) => re.test(pathBasename(n.path)));
+    }
+    if (method === "fs_search") {
+      const query = typeof p["query"] === "string" ? p["query"] : "";
+      const prefix = typeof p["prefix"] === "string" ? p["prefix"] : undefined;
+      const limit = typeof p["limit"] === "number" ? p["limit"] : undefined;
+      return client.search(query, { prefix, limit });
+    }
+    if (method === "fs_read") {
+      if (!cache)
+        throw { code: -32601, message: "fs_read: no workspace cache configured" };
+      const filePath = typeof p["path"] === "string" ? p["path"] : "";
+      const bytes = await cache.read(filePath);
+      return { bytes: Buffer.from(bytes).toString("base64"), size: bytes.byteLength };
+    }
+    if (method === "fs_exec") {
+      if (!cache)
+        throw { code: -32601, message: "fs_exec: no workspace cache configured" };
+      const argv = Array.isArray(p["argv"]) ? p["argv"] : [];
+      const cwd = typeof p["cwd"] === "string" ? p["cwd"] : "";
+      const workspace = typeof p["workspace"] === "string" ? p["workspace"] : "";
+      const decision = routeToolCall(argv, cwd, workspace);
+      switch (decision.kind) {
+        case "passthrough":
+          return { kind: "passthrough" };
+        case "fail_loud":
+          return { kind: "fail_loud", reason: decision.reason };
+        case "metadata": {
+          let nodes = await cache.ls(decision.prefix);
+          if (decision.nameGlob !== undefined) {
+            const regexSrc = decision.nameGlob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+            const re = new RegExp(`^${regexSrc}$`);
+            nodes = nodes.filter((n) => re.test(pathBasename(n.path)));
+          }
+          if (decision.oneLevel) {
+            const pfx = decision.prefix ? decision.prefix.split("/").filter(Boolean).join("/") : "";
+            const depth = pfx ? pfx.split("/").length + 1 : 1;
+            nodes = nodes.filter((n) => {
+              const parts = n.path.split("/").filter(Boolean);
+              if (parts.length !== depth)
+                return false;
+              return pfx ? n.path.startsWith(pfx + "/") : true;
+            });
+          }
+          return { kind: "metadata", nodes, fmt: decision.oneLevel ? "basename" : "path" };
+        }
+        case "search": {
+          const res = await client.search(decision.query, { prefix: decision.prefix });
+          if (!("results" in res))
+            return { kind: "fail_loud", reason: res.error };
+          return { kind: "search", results: res.results };
+        }
+        case "hydrate": {
+          const bytes = await cache.read(decision.path);
+          return {
+            kind: "hydrate",
+            bytes: Buffer.from(bytes).toString("base64"),
+            path: decision.path
+          };
+        }
+      }
     }
     throw { code: -32601, message: `Method not found: ${method}` };
   }
@@ -26833,7 +27402,7 @@ class Protocol {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1000;
-        await new Promise((resolve) => setTimeout(resolve, pollInterval));
+        await new Promise((resolve2) => setTimeout(resolve2, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -26845,7 +27414,7 @@ class Protocol {
   }
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -26923,7 +27492,7 @@ class Protocol {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve(parseResult.data);
+            resolve2(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -27114,12 +27683,12 @@ class Protocol {
         interval = task.pollInterval;
       }
     } catch {}
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve, interval);
+      const timeoutId = setTimeout(resolve2, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -27972,7 +28541,7 @@ class McpServer {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5000;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      await new Promise((resolve2) => setTimeout(resolve2, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -28590,12 +29159,12 @@ class StdioServerTransport {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve) => {
+    return new Promise((resolve2) => {
       const json = serializeMessage(message);
       if (this._stdout.write(json)) {
-        resolve();
+        resolve2();
       } else {
-        this._stdout.once("drain", resolve);
+        this._stdout.once("drain", resolve2);
       }
     });
   }
@@ -28604,7 +29173,7 @@ class StdioServerTransport {
 // src/mcp.ts
 import { connect } from "node:net";
 async function callIpc(socketPath, method, params) {
-  const { promise: promise2, resolve, reject } = Promise.withResolvers();
+  const { promise: promise2, resolve: resolve2, reject } = Promise.withResolvers();
   const socket = connect(socketPath);
   let buf = "";
   socket.on("data", (chunk) => {
@@ -28618,7 +29187,7 @@ async function callIpc(socketPath, method, params) {
         if ("error" in resp && resp.error !== undefined) {
           reject(new Error(`IPC error ${resp.error.code}: ${resp.error.message}`));
         } else {
-          resolve(resp.result);
+          resolve2(resp.result);
         }
       } catch (e) {
         reject(e);
@@ -28703,6 +29272,15 @@ function createMcpServer(socketPath) {
 ` + `• accept   — approve a DELIVERED task (verdict authority only → DONE, terminal).
 ` + `• reject   — reject a DELIVERED task back to ANNOUNCED.  Body MUST state the reason.
 ` + `• release  — voluntarily drop a CLAIMED task back to ANNOUNCED.  Use when blocked.
+` + `• file.write  — upsert a file in the room's metadata tree.
+` + `               data: {path: "src/foo.ts", content_hash: "r2:<64-hex-sha256>", size: <bytes>}
+` + `               Upload the blob first via the artifact endpoint; content_hash is r2:<sha256>.
+` + `• file.delete — remove a file from the metadata tree.
+` + `               data: {path: "src/foo.ts"}
+` + `• file.lock   — acquire an exclusive lease on a path; non-holder writes blocked (423).
+` + `               data: {path: "src/foo.ts"}  Re-locking by the holder renews the TTL.
+` + `• file.unlock — release your exclusive lease; only the holder may unlock.
+` + `               data: {path: "src/foo.ts"}
 
 ` + `Claiming commits you: you are expected to deliver or release.  If you cannot deliver,
 ` + `release early rather than letting the lease expire (which causes an escalate(stalled)).
@@ -28719,7 +29297,11 @@ function createMcpServer(socketPath) {
         "claim",
         "release",
         "accept",
-        "reject"
+        "reject",
+        "file.write",
+        "file.delete",
+        "file.lock",
+        "file.unlock"
       ]).describe("Message type — see description for the semantics of each"),
       body: exports_external.string().describe("Message body text"),
       task_ref: exports_external.string().optional().describe("Task identifier (required for announce, claim, deliver, release, accept, reject)"),
@@ -28727,7 +29309,12 @@ function createMcpServer(socketPath) {
       reply_to: exports_external.number().int().optional().describe("Seq of the entry being replied to"),
       mentions: exports_external.array(exports_external.string()).optional().describe('Participant IDs to @-mention (e.g. ["agentB@team"])'),
       artifacts: exports_external.array(exports_external.string()).optional().describe('Artifact refs — REQUIRED for deliver (e.g. ["pr://org/repo/42", "git:repo@sha"])'),
-      data: exports_external.record(exports_external.unknown()).optional().describe('Performative-specific payload (announce: {mode:"volunteer", lease_ttl_s?, verdict_by?})')
+      data: exports_external.record(exports_external.unknown()).optional().describe(`Performative-specific payload.
+` + `announce: {mode:"volunteer", lease_ttl_s?, verdict_by?}
+` + `file.write: {path: "src/foo.ts", content_hash: "r2:<64-hex-sha256>", size: <bytes>}
+` + `file.delete: {path: "src/foo.ts"}
+` + `file.lock:   {path: "src/foo.ts"} — acquires exclusive lease
+` + 'file.unlock: {path: "src/foo.ts"} — releases lease (holder only)')
     }
   }, async (args) => {
     try {
@@ -28850,6 +29437,71 @@ function createMcpServer(socketPath) {
   }, async (_args) => {
     try {
       return ok(await callIpc(socketPath, "room_roster", {}));
+    } catch (err2) {
+      if (isDaemonDown(err2))
+        return daemonDown();
+      throw err2;
+    }
+  });
+  server.registerTool("room_fs_ls", {
+    description: `List the room's file metadata tree (path, size, content_hash) for a prefix.
+
+` + "Returns the same data as `mesh fs ls` — the always-resident metadata tree that\n" + `lets you navigate the file plane without fetching any file content.
+
+` + `Use this to discover which files exist under a path prefix, check sizes, or
+` + `read content_hash refs before fetching blobs via room_fs_read.
+
+` + "Returns an array of {path, size, content_hash, tip_seq} objects.",
+    inputSchema: {
+      prefix: exports_external.string().optional().describe('Filter to paths starting with this prefix (e.g. "src/").  Omit for the full tree.')
+    }
+  }, async (args) => {
+    try {
+      return ok(await callIpc(socketPath, "fs_ls", { prefix: args.prefix }));
+    } catch (err2) {
+      if (isDaemonDown(err2))
+        return daemonDown();
+      throw err2;
+    }
+  });
+  server.registerTool("room_fs_search", {
+    description: `Full-text search across the room's file content index.
+
+` + `Proxies to the room's /search endpoint (FTS5 trigram index).  Returns ranked
+` + `results with path + snippet so you only hydrate matched files.
+
+` + `If the search index is not available (not yet built or host unreachable),
+` + `returns {error: "search_unavailable"} as a result — not an exception.
+
+` + "Returns {results: [{path, snippet, score}]} on success.",
+    inputSchema: {
+      query: exports_external.string().describe("Full-text search query"),
+      prefix: exports_external.string().optional().describe('Restrict search to paths under this prefix (e.g. "src/").'),
+      limit: exports_external.number().int().optional().describe("Maximum number of results to return.  Default: server decides.")
+    }
+  }, async (args) => {
+    try {
+      return ok(await callIpc(socketPath, "fs_search", { query: args.query, prefix: args.prefix, limit: args.limit }));
+    } catch (err2) {
+      if (isDaemonDown(err2))
+        return daemonDown();
+      throw err2;
+    }
+  });
+  server.registerTool("room_fs_read", {
+    description: `Fetch the content of a single file from the room's workspace cache.
+
+` + `Returns the file bytes encoded as base64 in {bytes, size}.  The daemon
+` + `hydrates the file from R2 on demand and caches it locally.
+
+` + `Use room_fs_ls first to discover valid paths and content_hash refs.
+` + "Throws (JSON-RPC error) when the path is not in the room tree.",
+    inputSchema: {
+      path: exports_external.string().describe('Room-relative file path (e.g. "src/foo.ts")')
+    }
+  }, async (args) => {
+    try {
+      return ok(await callIpc(socketPath, "fs_read", { path: args.path }));
     } catch (err2) {
       if (isDaemonDown(err2))
         return daemonDown();
@@ -29033,7 +29685,7 @@ function startDutyLoop(getState, selfId, configRoles, intervalMs, inject) {
 
 // src/main.ts
 function resolveHome(p) {
-  return p.startsWith("~/") ? join3(homedir2(), p.slice(2)) : resolve(p);
+  return p.startsWith("~/") ? join4(homedir2(), p.slice(2)) : resolve2(p);
 }
 function flag(args, name) {
   const idx = args.indexOf(name);
@@ -29057,7 +29709,7 @@ function pidAlive(pid) {
 }
 function loadSecretBytes(config2) {
   const keyPath = resolveHome(config2.identity.key);
-  if (!existsSync3(keyPath))
+  if (!existsSync4(keyPath))
     die(`identity key not found: ${keyPath}`);
   const identityFile = JSON.parse(readFileSync5(keyPath, "utf8"));
   const secretBytes = new Uint8Array(Buffer.from(identityFile.secret, "base64"));
@@ -29108,8 +29760,8 @@ async function cmdRun(configPath, opts) {
   const stateDir = resolveHome(config2.state_dir);
   mkdirSync3(stateDir, { recursive: true, mode: 448 });
   if (!opts.foreground && process.env["MESHL_DETACHED"] !== "1") {
-    const pidPath = join3(stateDir, "daemon.pid");
-    if (existsSync3(pidPath)) {
+    const pidPath = join4(stateDir, "daemon.pid");
+    if (existsSync4(pidPath)) {
       const existing = parseInt(readFileSync5(pidPath, "utf8").trim(), 10);
       if (Number.isInteger(existing) && pidAlive(existing)) {
         if (!opts.force) {
@@ -29123,14 +29775,14 @@ async function cmdRun(configPath, opts) {
         console.log(`[meshl] replacing running daemon (pid ${existing})`);
       }
     }
-    const logPath = join3(stateDir, "daemon.log");
+    const logPath = join4(stateDir, "daemon.log");
     const out = openSync(logPath, "a");
     const child = spawn(process.execPath, [process.argv[1], "run", "--config", configPath, "--foreground"], {
       detached: true,
       stdio: ["ignore", out, out],
       env: { ...process.env, MESHL_DETACHED: "1" }
     });
-    writeFileSync2(pidPath, `${child.pid}
+    writeFileSync3(pidPath, `${child.pid}
 `, { mode: 384 });
     child.unref();
     console.log(`meshl daemon started — pid ${child.pid}, room ${config2.room.id}`);
@@ -29140,12 +29792,14 @@ async function cmdRun(configPath, opts) {
   }
   const client = buildClient(config2, secretBytes, roomEntry.token);
   await registerWatches(client, config2);
-  const socketPath = join3(stateDir, "daemon.sock");
+  const socketPath = join4(stateDir, "daemon.sock");
+  const cache = new WorkspaceCache(join4(stateDir, "fs", config2.room.id), client);
   const ipcHandle = await startIpcServer({
     client,
     stateDir,
     socketPath,
-    selfId: config2.identity.id
+    selfId: config2.identity.id,
+    cache
   });
   if (config2.wake.backend === "mcp") {
     const noopInjector = {
@@ -29156,10 +29810,10 @@ async function cmdRun(configPath, opts) {
       console.error("[meshl] heartbeat error:", err2);
     });
     heartbeater2.start();
-    const { promise: promise2, resolve: resolve2 } = Promise.withResolvers();
+    const { promise: promise2, resolve: resolve3 } = Promise.withResolvers();
     const shutdown2 = () => {
       console.log("[meshl] stopping...");
-      resolve2();
+      resolve3();
     };
     process.once("SIGINT", shutdown2);
     process.once("SIGTERM", shutdown2);
@@ -29171,7 +29825,7 @@ async function cmdRun(configPath, opts) {
     return;
   }
   const rawInjector = buildInjector(config2);
-  const injector = config2.wake.tmux ? new HookStateInjector(rawInjector, config2.wake.tmux.pane, join3(stateDir, AGENT_STATE_FILE), (config2.wake.hook_busy_stale_s ?? 900) * 1000) : rawInjector;
+  const injector = config2.wake.tmux ? new HookStateInjector(rawInjector, config2.wake.tmux.pane, join4(stateDir, AGENT_STATE_FILE), (config2.wake.hook_busy_stale_s ?? 900) * 1000) : rawInjector;
   let consumerClient;
   let onWakeCb;
   let nudgeHandle = null;
@@ -29269,22 +29923,22 @@ async function cmdRun(configPath, opts) {
   await heartbeater.stop();
   await ipcHandle.close();
   try {
-    const pidPath = join3(stateDir, "daemon.pid");
-    if (existsSync3(pidPath) && parseInt(readFileSync5(pidPath, "utf8").trim(), 10) === process.pid) {
+    const pidPath = join4(stateDir, "daemon.pid");
+    if (existsSync4(pidPath) && parseInt(readFileSync5(pidPath, "utf8").trim(), 10) === process.pid) {
       rmSync2(pidPath, { force: true });
     }
   } catch {}
   console.log("[meshl] stopped");
 }
 async function cmdMcp(stateDir) {
-  const socketPath = join3(stateDir, "daemon.sock");
+  const socketPath = join4(stateDir, "daemon.sock");
   await runMcpStdio(socketPath);
 }
 async function cmdStop(configPath) {
   const config2 = loadConfig(configPath);
   const stateDir = resolveHome(config2.state_dir);
-  const pidPath = join3(stateDir, "daemon.pid");
-  if (!existsSync3(pidPath)) {
+  const pidPath = join4(stateDir, "daemon.pid");
+  if (!existsSync4(pidPath)) {
     die(`no daemon.pid in ${stateDir} — daemon not running? (start: meshl run --config ${configPath})`);
   }
   const pid = parseInt(readFileSync5(pidPath, "utf8").trim(), 10);
@@ -29320,7 +29974,7 @@ async function cmdValidate(configPath) {
 `);
   };
   const keyPath = resolveHome(config2.identity.key);
-  if (existsSync3(keyPath)) {
+  if (existsSync4(keyPath)) {
     pass(`identity key readable: ${keyPath}`);
   } else {
     fail(`identity key not found: ${keyPath}`);
@@ -29381,9 +30035,9 @@ async function cmdValidate(configPath) {
 async function cmdStatus(configPath) {
   const config2 = loadConfig(configPath);
   const stateDir = resolveHome(config2.state_dir);
-  const cursorPath = join3(stateDir, "wake_cursor.json");
+  const cursorPath = join4(stateDir, "wake_cursor.json");
   let cursorSeq = "none";
-  if (existsSync3(cursorPath)) {
+  if (existsSync4(cursorPath)) {
     try {
       const raw = JSON.parse(readFileSync5(cursorPath, "utf8"));
       cursorSeq = String(raw.seq);
@@ -29409,7 +30063,7 @@ async function cmdStatus(configPath) {
   let hookState = "n/a";
   if (config2.wake.backend === "tmux" && config2.wake.tmux) {
     const staleMs = (config2.wake.hook_busy_stale_s ?? 900) * 1000;
-    const stateFile = join3(stateDir, AGENT_STATE_FILE);
+    const stateFile = join4(stateDir, AGENT_STATE_FILE);
     try {
       const raw = readFileSync5(stateFile, "utf8").trim();
       const ageS = Math.round((Date.now() - statSync3(stateFile).mtimeMs) / 1000);
@@ -29455,9 +30109,9 @@ async function cmdPoke(configPath) {
       const { secretBytes } = loadSecretBytes(config2);
       const client = buildClient(config2, secretBytes, roomEntry.token);
       const state = await client.getState();
-      const cursorPath = join3(stateDir, "wake_cursor.json");
+      const cursorPath = join4(stateDir, "wake_cursor.json");
       let cursorNum = -1;
-      if (existsSync3(cursorPath)) {
+      if (existsSync4(cursorPath)) {
         try {
           cursorNum = JSON.parse(readFileSync5(cursorPath, "utf8")).seq;
         } catch {}
@@ -29490,13 +30144,44 @@ Commands:
   hooks [--runtime claude|omp] --state-dir <dir>
                                        Print idle/busy state hooks (the robust wake signal):
                                        claude → .claude/settings.json JSON; omp → an --hook module.
+  exec [--workspace <dir>] [--state-dir <dir>] -- <agent cmd...>
+                                       Launch an agent in the mesh workspace with shim binDir
+                                       prepended to PATH (opt-in, sovereign; A2 reframe).
   help                                 Show this help.
 
 wake.backend (in mesh.yml):  tmux (push into a pane) | mcp (pull-only, no tmux) | hybrid (both).
 `);
 }
+async function cmdExec(opts) {
+  const resolvedWorkspace = resolveHome(opts.workspace);
+  const resolvedStateDir = resolveHome(opts.stateDir);
+  const binDir = join4(resolvedStateDir, "shims");
+  const socketPath = join4(resolvedStateDir, "daemon.sock");
+  mkdirSync3(binDir, { recursive: true, mode: 448 });
+  installShims(binDir, socketPath, resolvedWorkspace);
+  const childEnv = buildExecEnv({
+    binDir,
+    workspace: resolvedWorkspace,
+    socketPath,
+    parentEnv: process.env
+  });
+  const [cmd, ...args] = opts.agentCmd;
+  if (!cmd)
+    die("meshl exec: agent command must not be empty");
+  const child = spawn(cmd, args, {
+    cwd: resolvedWorkspace,
+    env: childEnv,
+    stdio: "inherit"
+  });
+  await new Promise((res, rej) => {
+    child.on("exit", (code, signal) => {
+      process.exit(code !== null ? code : signal ? 1 : 0);
+    });
+    child.on("error", rej);
+  });
+}
 function cmdHooks(stateDir, runtime) {
-  const file = join3(stateDir, AGENT_STATE_FILE);
+  const file = join4(stateDir, AGENT_STATE_FILE);
   if (runtime === "omp") {
     process.stderr.write(`# Oh My Pi (omp) idle/busy hook. Save it, then launch the agent with --hook:
 ` + `#   meshl hooks --runtime omp --state-dir ${stateDir} > ~/mesh-agent/state-hook.ts
@@ -29563,6 +30248,17 @@ try {
     if (runtime !== "claude" && runtime !== "omp")
       die(`unknown --runtime "${runtime}" (use claude or omp)`);
     cmdHooks(resolveHome(stateDir), runtime);
+  } else if (cmd === "exec") {
+    const ddIdx = rest.indexOf("--");
+    if (ddIdx === -1)
+      die("usage: meshl exec [--workspace <dir>] [--state-dir <dir>] -- <agent cmd...>");
+    const execArgs = rest.slice(0, ddIdx);
+    const agentCmd = rest.slice(ddIdx + 1);
+    if (agentCmd.length === 0)
+      die("meshl exec: agent command must follow '--'");
+    const workspace = flag(execArgs, "--workspace") ?? process.cwd();
+    const stateDir = flag(execArgs, "--state-dir") ?? "~/.mesh/state";
+    await cmdExec({ workspace, stateDir, agentCmd });
   } else {
     const configPath = flag(rest, "--config") ?? "mesh.yml";
     if (cmd === "run") {

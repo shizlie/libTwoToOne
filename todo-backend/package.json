@@ -1,0 +1,11 @@
+{
+  "name": "todo-backend",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Deliberately-buggy TODO API backend (no frontend) — the mesh shared-workspace demo fixture. Agents fix it across machines through one shared workspace.",
+  "scripts": {
+    "start": "bun src/server.ts",
+    "test": "bun test"
+  }
+}

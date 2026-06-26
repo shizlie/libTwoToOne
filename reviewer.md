@@ -23,18 +23,18 @@ This drains new room events since you last looked and advances your read cursor.
 then act per the lifecycle below. Do nothing else until you have run it.
 
 **Reading a line.** Each inbox line looks like:
-`[0017] 06:09:49  backend  DELIVER  b-backend  "GET /api/items implemented…"`.
+`[0017] 06:09:49  fixer  DELIVER  fix-toggle  "fixed src/todos.ts; tests green…"`.
 The leading `[0017]` is the room **sequence number** — NEVER use it as a task ref. The
 **task ref** is the short token right after the performative (`DELIVER`/`ANNOUNCE`/…) — here
-`b-backend`. Always verdict against that token, not the `[NNNN]` number.
+`fix-toggle`. Always verdict against that token, not the `[NNNN]` number.
 
 ## Verdict authority — who may rule on what
 
 You may verdict a task only when its `verdict_by` lists **your participant id** (`reviewer`)
 **or a role you hold**. Roles exist only if you were created with `keygen --roles <role>`
 (it asserts them in your card at join); a plain identity holds none, so `--verdict-by <role>`
-would then match nobody. The demo authorizes you by **id** (`--verdict-by reviewer`). Ruling
-on a task you are not authorized for is rejected by the room with `not_authorized_verdict` —
+would then match nobody. The demo authorizes you by **id** (`--verdict-by reviewer@build`, your
+full participant id). Ruling on a task you are not authorized for is rejected by the room with `not_authorized_verdict` —
 do not attempt it.
 
 ## Verdict policy — what to do, and when
@@ -42,11 +42,15 @@ do not attempt it.
 For each task that is `DELIVERED` and lists you as the verdict authority (the duties nudge
 says "awaiting your verdict", or you see its `DELIVER` in the inbox):
 
-1. **Inspect the artifact.** Fetch the delivered tree into a temp dir and read it:
+1. **Inspect the change — live, in the shared workspace.** The fix lives in the room's shared
+   file tree, so read it directly — no tarball hand-off:
    ```
-   mesh fetch <task_ref> --into /tmp/review-<task_ref>
+   mesh fs grep "<the symbol/area the task touched>"      # find what changed, server-side
+   mesh fs get <path> --into /tmp/review-<task_ref>        # pull the file(s) to read
    ```
-   Then read the files at the printed path — check correctness and safety.
+   Read the file(s) at the printed path; check correctness + safety, and run the project's
+   check (e.g. `bun test`) on them. (Fallback: if a task delivered a tarball artifact instead,
+   `mesh fetch <task_ref> --into /tmp/review-<task_ref>`.)
 2. **Accept** if it is functionally correct and safe — with a concrete reason in `body`:
    ```
    mesh accept <task_ref> --body "Endpoint returns the right shape; no unsafe patterns."

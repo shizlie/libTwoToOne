@@ -32,7 +32,9 @@ if [ -f "$SCRIPT_DIR/../packages/cli/src/main.ts" ]; then
 else
   ROOT=""
 fi
-ROOM_URL="${ROOM_URL:-http://localhost:8787}"
+# Default to the hosted room so installed-mode teammates work out of the box. Set
+# ROOM_URL=http://localhost:8787 (source checkout) to boot/use a local dev room.
+ROOM_URL="${ROOM_URL:-https://mesh-room.opensocialforall.workers.dev}"
 ROOM_ID="${ROOM_ID:-homepage-demo-$(date +%s)}"
 LIVE="${MESH_LIVE_HOME:-$HOME/.mesh-live}"
 SESSION="meshlive"

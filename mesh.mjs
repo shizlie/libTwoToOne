@@ -65,6 +65,20 @@ var require_canonicalize = __commonJS((exports, module) => {
   };
 });
 
+// src/suppress-warnings.ts
+var passthrough = process.emitWarning.bind(process);
+function isWebStorageNoise(warning, type) {
+  const message = typeof warning === "string" ? warning : warning?.message ?? "";
+  return /localstorage-file|localStorage is not available|web ?storage/i.test(message) || type === "ExperimentalWarning" && /localstorage/i.test(message);
+}
+process.emitWarning = (warning, ...rest) => {
+  const opt = rest[0];
+  const type = typeof opt === "string" ? opt : opt?.type;
+  if (isWebStorageNoise(warning, type))
+    return;
+  return passthrough(warning, ...rest);
+};
+
 // src/config.ts
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -7429,7 +7443,7 @@ function bytesToDoc(bytes) {
 // src/main.ts
 import { readFileSync as readFileSync2, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3 } from "node:fs";
 import * as os2 from "node:os";
-import { resolve, dirname, sep } from "node:path";
+import { resolve, join as join2, dirname, sep } from "node:path";
 function parseArgs(argv) {
   const positional = [];
   const flags = {};
@@ -8062,7 +8076,8 @@ async function cmdFetch(args2) {
   const bytes = await client.getArtifact(ref.hash);
   if (!(bytes instanceof Uint8Array))
     die(`fetch: [${bytes.error}] ${bytes.detail}${bytes.hint ? " — " + bytes.hint : ""}`);
-  const dest = resolve(flag(args2, "into") ?? `./.mesh/artifacts/${arg.startsWith("r2:") ? ref.hash : arg}`);
+  const name = arg.startsWith("r2:") ? ref.hash : arg;
+  const dest = resolve(flag(args2, "into") ?? join2(home ?? meshHome(), "artifacts", name));
   await unpackInto(bytes, dest);
   ok(`Extracted to ${dest}`);
 }
@@ -8482,7 +8497,7 @@ Commands:
   watch entry [--performative P] [--thread T]         Register entry watch
             [--mention-me]
   inbox [--since <seq>] [--mark]                      Fetch from read cursor
-  fetch <task|r2:hash> [--into <dir>]                 Download + extract a delivered artifact
+  fetch <task|r2:hash> [--into <dir>]                 Download + extract a delivered artifact (default: $MESH_HOME/artifacts/<task>)
   fs put <path> [--as <repopath>]                     Upload file + post file.write (OCC merge-on-write)
   fs ls [<prefix>]                                    List the shared file tree
   fs get <repopath> [--into <dir>]                    Hydrate a file from the tree (default: .mesh/fs)

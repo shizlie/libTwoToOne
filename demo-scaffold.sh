@@ -2,7 +2,7 @@
 # demo-scaffold.sh — ONE command that scaffolds the whole shared-workspace demo.
 #
 # What it stands up, end to end (no per-agent copy-paste):
-#   1. a room (boots a local one if none is reachable),
+#   1. a room (uses the hosted room by default; boots a local one only if ROOM_URL is localhost),
 #   2. an owner identity + the room,
 #   3. a SHARED WORKSPACE seeded with a deliberately-buggy TODO backend
 #      (examples/todo-backend) — `toggle()` never un-completes a todo; a test fails,
@@ -19,7 +19,7 @@
 #   bash scripts/demo-scaffold.sh --fire         # also announce the fix task for you
 #   bash scripts/demo-scaffold.sh --clean        # tear down agents/listeners + wipe demo state
 #
-# Env:  ROOM_URL (default http://localhost:8787)   ROOM_ID (default todo-demo-<ts>)
+# Env:  ROOM_URL (default https://mesh-room.opensocialforall.workers.dev)   ROOM_ID (default todo-demo-<ts>)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,7 +30,9 @@ if [ -f "$SCRIPT_DIR/../packages/cli/src/main.ts" ]; then
 else
   ROOT=""
 fi
-ROOM_URL="${ROOM_URL:-http://localhost:8787}"
+# Default to the hosted room so installed-mode teammates work out of the box (no local
+# wrangler needed). Set ROOM_URL=http://localhost:8787 to boot/use a local dev room.
+ROOM_URL="${ROOM_URL:-https://mesh-room.opensocialforall.workers.dev}"
 ROOM_ID="${ROOM_ID:-todo-demo-$(date +%s)}"
 LIVE="${MESH_DEMO_HOME:-$HOME/.mesh-demo}"
 SESSION="meshdemo"

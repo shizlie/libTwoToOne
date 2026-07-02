@@ -13582,9 +13582,10 @@ var require_dist = __commonJS((exports, module) => {
 
 // src/main.ts
 import { readFileSync as readFileSync5, existsSync as existsSync4, statSync as statSync3 } from "node:fs";
-import { mkdirSync as mkdirSync3, openSync, writeFileSync as writeFileSync3, rmSync as rmSync2 } from "node:fs";
+import { mkdirSync as mkdirSync3, openSync, writeFileSync as writeFileSync3, rmSync as rmSync2, realpathSync as realpathSync2 } from "node:fs";
 import { join as join4, resolve as resolve2 } from "node:path";
 import { homedir as homedir2 } from "node:os";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
 // src/config.ts
@@ -14769,7 +14770,9 @@ var PERFORMATIVE_SET = {
   "system.roles": true,
   "system.grant": true,
   "system.role": true,
-  "system.config": true
+  "system.config": true,
+  "system.lease_clear": true,
+  "system.revoke": true
 };
 var ROOM_ONLY = {
   escalate: true,
@@ -14779,7 +14782,9 @@ var ROOM_ONLY = {
   "system.roles": true,
   "system.grant": true,
   "system.role": true,
-  "system.config": true
+  "system.config": true,
+  "system.lease_clear": true,
+  "system.revoke": true
 };
 var PARTICIPANT_PERFORMATIVES = Object.keys(PERFORMATIVE_SET).filter((p) => !(p in ROOM_ONLY));
 // ../proto/src/machine.ts
@@ -14794,12 +14799,17 @@ function matchesWatch(watch, entry) {
     return false;
   const data = sub.data;
   if (watch.path !== undefined) {
-    if (perf.startsWith("file.")) {
+    if (perf.startsWith("file.") || perf === "system.lease_clear") {
       if (data?.["path"] !== watch.path)
         return false;
     } else if (perf === "system.grant") {
       const raw = typeof data?.["path_prefix"] === "string" ? data["path_prefix"] : "";
       if (!prefixCovers(raw, watch.path))
+        return false;
+    } else if (perf === "system.revoke") {
+      const grant = data?.["grant"];
+      const raw = typeof grant?.path_prefix === "string" ? grant.path_prefix : "";
+      if (!raw || !prefixCovers(raw, watch.path))
         return false;
     } else {
       return false;
@@ -14808,6 +14818,10 @@ function matchesWatch(watch, entry) {
   if (watch.participant !== undefined) {
     if (perf === "system.role") {
       if (data?.["participant"] !== watch.participant)
+        return false;
+    } else if (perf === "system.revoke") {
+      const role = data?.["role"];
+      if (role?.participant !== watch.participant)
         return false;
     } else {
       return false;
@@ -14941,7 +14955,15 @@ class Consumer {
   selfId;
   running = false;
   streamCursor;
-  constructor(client, config, onWake, stateDir, selfId = config.identity.id) {
+  queuedSeqs = new Set;
+  queuedOrder = [];
+  static RECENT_SEQ_CAP = 512;
+  recentSeqCap;
+  entryCache = new Map;
+  entryCacheOrder = [];
+  static ENTRY_CACHE_CAP = 256;
+  entryCacheCap;
+  constructor(client, config, onWake, stateDir, selfId = config.identity.id, testCaps = {}) {
     this.client = client;
     this.config = config;
     this.onWake = onWake;
@@ -14949,6 +14971,8 @@ class Consumer {
     this.selfId = selfId;
     mkdirSync(stateDir, { recursive: true });
     this.streamCursor = loadWakeCursor(stateDir);
+    this.recentSeqCap = testCaps.recentSeqCap ?? Consumer.RECENT_SEQ_CAP;
+    this.entryCacheCap = testCaps.entryCacheCap ?? Consumer.ENTRY_CACHE_CAP;
   }
   async start() {
     this.running = true;
@@ -14970,15 +14994,87 @@ class Consumer {
     await this.onWake(digest, maxSeq);
     await persistWakeCursor(this.stateDir, maxSeq);
   }
+  _alreadyQueued(seq) {
+    return this.queuedSeqs.has(seq);
+  }
+  _markQueued(seq) {
+    this.queuedSeqs.add(seq);
+    this.queuedOrder.push(seq);
+    if (this.queuedOrder.length > this.recentSeqCap) {
+      const evicted = this.queuedOrder.shift();
+      if (evicted !== undefined)
+        this.queuedSeqs.delete(evicted);
+    }
+  }
+  _cacheEntry(entry) {
+    if (this.entryCache.has(entry.seq))
+      return;
+    this.entryCache.set(entry.seq, entry);
+    this.entryCacheOrder.push(entry.seq);
+    if (this.entryCacheOrder.length > this.entryCacheCap) {
+      const evicted = this.entryCacheOrder.shift();
+      if (evicted !== undefined)
+        this.entryCache.delete(evicted);
+    }
+  }
+  async _enqueue(entry, debouncer) {
+    if (this._alreadyQueued(entry.seq))
+      return;
+    this._markQueued(entry.seq);
+    const survivors = await gate([entry], this.config);
+    for (const s of survivors) {
+      debouncer.add(s);
+    }
+  }
   async _processEntry(entry, debouncer) {
+    this._cacheEntry(entry);
     if (entry.seq > this.streamCursor) {
       this.streamCursor = entry.seq;
     }
     if (!matchesT0(entry, this.config, this.selfId))
       return;
-    const survivors = await gate([entry], this.config);
-    for (const s of survivors) {
-      debouncer.add(s);
+    await this._enqueue(entry, debouncer);
+  }
+  _isOwnEntry(entry) {
+    return entry.submission.sender === this.selfId;
+  }
+  async _fetchAndEnqueueNotify(seq, debouncer) {
+    if (this._alreadyQueued(seq))
+      return;
+    const cached = this.entryCache.get(seq);
+    if (cached !== undefined) {
+      if (cached.seq > this.streamCursor)
+        this.streamCursor = cached.seq;
+      if (this._isOwnEntry(cached))
+        return;
+      await this._enqueue(cached, debouncer);
+      return;
+    }
+    const result = await this.client.getEntries({ since: seq - 1, limit: 1 });
+    const entry = result.entries.find((e) => e.seq === seq);
+    if (entry === undefined)
+      return;
+    this._cacheEntry(entry);
+    if (entry.seq > this.streamCursor)
+      this.streamCursor = entry.seq;
+    if (this._isOwnEntry(entry))
+      return;
+    await this._enqueue(entry, debouncer);
+  }
+  async _processNotify(entrySeq, debouncer) {
+    await this._fetchAndEnqueueNotify(entrySeq, debouncer);
+  }
+  async _processPollNotifies(notifies, fetchedEntries, debouncer) {
+    const bySeq = new Map(fetchedEntries.map((e) => [e.seq, e]));
+    for (const n of notifies) {
+      const entry = bySeq.get(n.entry_seq);
+      if (entry !== undefined) {
+        if (this._isOwnEntry(entry))
+          continue;
+        await this._enqueue(entry, debouncer);
+      } else {
+        await this._fetchAndEnqueueNotify(n.entry_seq, debouncer);
+      }
     }
   }
   async _runLoop(debouncer) {
@@ -14992,6 +15088,9 @@ class Consumer {
           if (frame.type === "entry") {
             gotData = true;
             await this._processEntry(frame.entry, debouncer);
+          } else if (frame.type === "notify") {
+            gotData = true;
+            await this._processNotify(frame.entry_seq, debouncer);
           }
         }
       } catch {}
@@ -15005,6 +15104,13 @@ class Consumer {
             return;
           gotData = true;
           await this._processEntry(entry, debouncer);
+        }
+        const notifies = result.notifies ?? [];
+        if (notifies.length > 0) {
+          if (!this.running)
+            return;
+          gotData = true;
+          await this._processPollNotifies(notifies, result.entries, debouncer);
         }
       } catch {
         if (!this.running)
@@ -15088,25 +15194,36 @@ class Heartbeater {
     const state = await this.client.getState();
     const now = Date.now();
     const leaseTtlMs = state.defaults.lease_ttl_s * 1000;
-    const stale = [];
+    const renewedThreshold = now + (leaseTtlMs - this.intervalMs);
+    const staleClaims = [];
     for (const claim of state.claims) {
       if (claim.state !== "CLAIMED" || claim.holder !== this.selfId)
         continue;
       if (!claim.lease_expires)
         continue;
       const expiresAt = Date.parse(claim.lease_expires);
-      const renewedThreshold = now + (leaseTtlMs - this.intervalMs);
       if (expiresAt > renewedThreshold)
         continue;
-      stale.push(claim);
+      staleClaims.push(claim);
     }
-    if (stale.length === 0)
+    const leases = await this.client.listLeases({ mine: true });
+    let staleLeases;
+    if ("error" in leases) {
+      this.onError(new Error(`listLeases failed: [${leases.error}] — file-lease renewal skipped this tick`));
+      staleLeases = [];
+    } else {
+      staleLeases = leases.filter((lease) => lease.holder === this.selfId && lease.lease_expires <= renewedThreshold);
+    }
+    if (staleClaims.length === 0 && staleLeases.length === 0)
       return;
     const probeState = await this.injector.probe();
     if (probeState === "gone")
       return;
-    for (const claim of stale) {
+    for (const claim of staleClaims) {
       await this.client.heartbeat(claim.task_ref);
+    }
+    for (const lease of staleLeases) {
+      await this.client.fileHeartbeat(lease.path);
     }
   }
 }
@@ -15284,6 +15401,9 @@ class MeshClient {
   constructor(opts) {
     this.opts = opts;
   }
+  get roomId() {
+    return this.opts.roomId;
+  }
   buildSubmission(input) {
     const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("hex");
     const client_ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -15426,6 +15546,13 @@ class MeshClient {
     const data = await res.json();
     return { ok: true, lease_expires: data.lease_expires };
   }
+  async fileHeartbeat(path2) {
+    const res = await this._post("/leases/heartbeat", { path: path2 });
+    if (!res.ok)
+      return this._err(res);
+    const data = await res.json();
+    return { ok: true, lease_expires: data.lease_expires };
+  }
   async postWatch(predicate) {
     const res = await this._post("/watches", { predicate });
     if (!res.ok)
@@ -15491,8 +15618,9 @@ class MeshClient {
   async listRoles() {
     return this._getList("/roles", "roles");
   }
-  async listLeases() {
-    return this._getList("/leases", "leases");
+  async listLeases(opts) {
+    const q = opts?.mine ? "?holder=me" : "";
+    return this._getList(`/leases${q}`, "leases");
   }
   async grant(subject, path2, grade) {
     return this._postSeq("/grants", { path_prefix: path2, subject, access: grade });
@@ -15502,6 +15630,12 @@ class MeshClient {
   }
   async setDefaultAccess(access) {
     return this._postSeq("/config", { default_access: access });
+  }
+  async revokeGrant(subject, path2) {
+    return this._postSeq("/grants/revoke", { path_prefix: path2, subject });
+  }
+  async removeRole(participant, role) {
+    return this._postSeq("/roles/revoke", { participant, role });
   }
   async search(query, opts) {
     const params = new URLSearchParams({ q: query });
@@ -29850,6 +29984,11 @@ async function registerWatches(client, config2) {
     }
   }
 }
+function checkHeartbeatCadence(intervalS, leaseTtlS) {
+  if (intervalS < leaseTtlS)
+    return null;
+  return `[meshl] heartbeat.interval_s (${intervalS}) >= room lease_ttl_s ` + `(${leaseTtlS}) — file/task leases will expire between heartbeats`;
+}
 async function cmdRun(configPath, opts) {
   const config2 = loadConfig(configPath);
   const { secretBytes } = loadSecretBytes(config2);
@@ -29891,6 +30030,14 @@ async function cmdRun(configPath, opts) {
   }
   const client = buildClient(config2, secretBytes, roomEntry.token);
   await registerWatches(client, config2);
+  try {
+    const startupState = await client.getState();
+    const cadenceWarning = checkHeartbeatCadence(config2.heartbeat.interval_s, startupState.defaults.lease_ttl_s);
+    if (cadenceWarning)
+      console.warn(cadenceWarning);
+  } catch (err2) {
+    console.error("[meshl] startup getState failed (heartbeat/TTL check skipped):", err2);
+  }
   const socketPath = join4(stateDir, "daemon.sock");
   const cache = new WorkspaceCache(join4(stateDir, "fs", config2.room.id), client);
   const ipcHandle = await startIpcServer({
@@ -30326,56 +30473,67 @@ function cmdHooks(stateDir, runtime) {
   process.stdout.write(JSON.stringify(snippet, null, 2) + `
 `);
 }
-var argv = process.argv.slice(2);
-var cmd = argv[0];
-var rest = argv.slice(1);
-if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
-  usage();
-  process.exit(cmd ? 0 : 1);
+var isMainModule = typeof Bun !== "undefined" && Bun.main === fileURLToPath(import.meta.url);
+if (!isMainModule && process.argv[1] !== undefined) {
+  try {
+    isMainModule = fileURLToPath(import.meta.url) === realpathSync2(process.argv[1]);
+  } catch {}
 }
-try {
-  if (cmd === "mcp") {
-    const stateDir = flag(rest, "--state-dir");
-    if (!stateDir)
-      die("usage: meshl mcp --state-dir <dir>");
-    await cmdMcp(resolveHome(stateDir));
-  } else if (cmd === "hooks") {
-    const stateDir = flag(rest, "--state-dir");
-    if (!stateDir)
-      die("usage: meshl hooks [--runtime claude|omp] --state-dir <dir>");
-    const runtime = (flag(rest, "--runtime") ?? "claude").toLowerCase();
-    if (runtime !== "claude" && runtime !== "omp")
-      die(`unknown --runtime "${runtime}" (use claude or omp)`);
-    cmdHooks(resolveHome(stateDir), runtime);
-  } else if (cmd === "exec") {
-    const ddIdx = rest.indexOf("--");
-    if (ddIdx === -1)
-      die("usage: meshl exec [--workspace <dir>] [--state-dir <dir>] -- <agent cmd...>");
-    const execArgs = rest.slice(0, ddIdx);
-    const agentCmd = rest.slice(ddIdx + 1);
-    if (agentCmd.length === 0)
-      die("meshl exec: agent command must follow '--'");
-    const workspace = flag(execArgs, "--workspace") ?? process.cwd();
-    const stateDir = flag(execArgs, "--state-dir") ?? "~/.mesh/state";
-    await cmdExec({ workspace, stateDir, agentCmd });
-  } else {
-    const configPath = flag(rest, "--config") ?? "mesh.yml";
-    if (cmd === "run") {
-      await cmdRun(configPath, { foreground: hasFlag(rest, "--foreground") || hasFlag(rest, "-f"), force: hasFlag(rest, "--force") });
-    } else if (cmd === "stop") {
-      await cmdStop(configPath);
-    } else if (cmd === "validate") {
-      await cmdValidate(configPath);
-    } else if (cmd === "status") {
-      await cmdStatus(configPath);
-    } else if (cmd === "poke") {
-      await cmdPoke(configPath);
-    } else {
-      die(`unknown command "${cmd}". Run "meshl help" for usage.`);
-    }
+if (isMainModule) {
+  const argv = process.argv.slice(2);
+  const cmd = argv[0];
+  const rest = argv.slice(1);
+  if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
+    usage();
+    process.exit(cmd ? 0 : 1);
   }
-} catch (e) {
-  process.stderr.write(`meshl: ${e instanceof Error ? e.message : String(e)}
+  try {
+    if (cmd === "mcp") {
+      const stateDir = flag(rest, "--state-dir");
+      if (!stateDir)
+        die("usage: meshl mcp --state-dir <dir>");
+      await cmdMcp(resolveHome(stateDir));
+    } else if (cmd === "hooks") {
+      const stateDir = flag(rest, "--state-dir");
+      if (!stateDir)
+        die("usage: meshl hooks [--runtime claude|omp] --state-dir <dir>");
+      const runtime = (flag(rest, "--runtime") ?? "claude").toLowerCase();
+      if (runtime !== "claude" && runtime !== "omp")
+        die(`unknown --runtime "${runtime}" (use claude or omp)`);
+      cmdHooks(resolveHome(stateDir), runtime);
+    } else if (cmd === "exec") {
+      const ddIdx = rest.indexOf("--");
+      if (ddIdx === -1)
+        die("usage: meshl exec [--workspace <dir>] [--state-dir <dir>] -- <agent cmd...>");
+      const execArgs = rest.slice(0, ddIdx);
+      const agentCmd = rest.slice(ddIdx + 1);
+      if (agentCmd.length === 0)
+        die("meshl exec: agent command must follow '--'");
+      const workspace = flag(execArgs, "--workspace") ?? process.cwd();
+      const stateDir = flag(execArgs, "--state-dir") ?? "~/.mesh/state";
+      await cmdExec({ workspace, stateDir, agentCmd });
+    } else {
+      const configPath = flag(rest, "--config") ?? "mesh.yml";
+      if (cmd === "run") {
+        await cmdRun(configPath, { foreground: hasFlag(rest, "--foreground") || hasFlag(rest, "-f"), force: hasFlag(rest, "--force") });
+      } else if (cmd === "stop") {
+        await cmdStop(configPath);
+      } else if (cmd === "validate") {
+        await cmdValidate(configPath);
+      } else if (cmd === "status") {
+        await cmdStatus(configPath);
+      } else if (cmd === "poke") {
+        await cmdPoke(configPath);
+      } else {
+        die(`unknown command "${cmd}". Run "meshl help" for usage.`);
+      }
+    }
+  } catch (e) {
+    process.stderr.write(`meshl: ${e instanceof Error ? e.message : String(e)}
 `);
-  process.exit(1);
+    process.exit(1);
+  }
 }
+export {
+  checkHeartbeatCadence
+};

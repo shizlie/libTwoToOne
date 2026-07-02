@@ -1011,7 +1011,9 @@ var PERFORMATIVE_SET = {
   "system.roles": true,
   "system.grant": true,
   "system.role": true,
-  "system.config": true
+  "system.config": true,
+  "system.lease_clear": true,
+  "system.revoke": true
 };
 var ROOM_ONLY = {
   escalate: true,
@@ -1021,7 +1023,9 @@ var ROOM_ONLY = {
   "system.roles": true,
   "system.grant": true,
   "system.role": true,
-  "system.config": true
+  "system.config": true,
+  "system.lease_clear": true,
+  "system.revoke": true
 };
 var PARTICIPANT_PERFORMATIVES = Object.keys(PERFORMATIVE_SET).filter((p) => !(p in ROOM_ONLY));
 // ../proto/src/machine.ts
@@ -1312,6 +1316,9 @@ class MeshClient {
   constructor(opts) {
     this.opts = opts;
   }
+  get roomId() {
+    return this.opts.roomId;
+  }
   buildSubmission(input) {
     const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("hex");
     const client_ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -1454,6 +1461,13 @@ class MeshClient {
     const data = await res.json();
     return { ok: true, lease_expires: data.lease_expires };
   }
+  async fileHeartbeat(path2) {
+    const res = await this._post("/leases/heartbeat", { path: path2 });
+    if (!res.ok)
+      return this._err(res);
+    const data = await res.json();
+    return { ok: true, lease_expires: data.lease_expires };
+  }
   async postWatch(predicate) {
     const res = await this._post("/watches", { predicate });
     if (!res.ok)
@@ -1519,8 +1533,9 @@ class MeshClient {
   async listRoles() {
     return this._getList("/roles", "roles");
   }
-  async listLeases() {
-    return this._getList("/leases", "leases");
+  async listLeases(opts) {
+    const q = opts?.mine ? "?holder=me" : "";
+    return this._getList(`/leases${q}`, "leases");
   }
   async grant(subject, path2, grade) {
     return this._postSeq("/grants", { path_prefix: path2, subject, access: grade });
@@ -1530,6 +1545,12 @@ class MeshClient {
   }
   async setDefaultAccess(access) {
     return this._postSeq("/config", { default_access: access });
+  }
+  async revokeGrant(subject, path2) {
+    return this._postSeq("/grants/revoke", { path_prefix: path2, subject });
+  }
+  async removeRole(participant, role) {
+    return this._postSeq("/roles/revoke", { participant, role });
   }
   async search(query, opts) {
     const params = new URLSearchParams({ q: query });
@@ -1724,7 +1745,12 @@ var PERF_STYLE = {
   "system.genesis": { label: "genesis", color: C2.grey },
   "system.join": { label: "join", color: C2.grey },
   "system.leave": { label: "leave", color: C2.grey },
-  "system.roles": { label: "roles", color: C2.grey }
+  "system.roles": { label: "roles", color: C2.grey },
+  "system.grant": { label: "grant", color: C2.grey },
+  "system.role": { label: "role", color: C2.grey },
+  "system.config": { label: "config", color: C2.grey },
+  "system.lease_clear": { label: "lapse", color: C2.yellow },
+  "system.revoke": { label: "revoke", color: C2.red }
 };
 function truncate(s, max) {
   return s.length <= max ? s : s.slice(0, max - 1) + "…";
@@ -2403,9 +2429,9 @@ async function fsPutOcc(client, repopath, bytes) {
 }
 
 // src/main.ts
-import { readFileSync as readFileSync2, writeFileSync as writeFileSync3, mkdirSync as mkdirSync4 } from "node:fs";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync4, mkdirSync as mkdirSync5 } from "node:fs";
 import * as os2 from "node:os";
-import { resolve as resolve2, join as join3, dirname as dirname4, sep as sep2 } from "node:path";
+import { resolve as resolve2, join as join4, dirname as dirname5, sep as sep2 } from "node:path";
 
 // src/deps.ts
 import { dirname as dirname2, join as join2, normalize } from "node:path";
@@ -7700,8 +7726,170 @@ function bytesToDoc(bytes) {
 }
 
 // src/fs-edit.ts
-import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync2 } from "node:fs";
-import { resolve, dirname as dirname3, sep } from "node:path";
+import { mkdirSync as mkdirSync4, writeFileSync as writeFileSync3, readFileSync as readFileSync3 } from "node:fs";
+import { resolve, dirname as dirname4, sep } from "node:path";
+
+// src/edit-base.ts
+import * as fs2 from "node:fs";
+import * as path2 from "node:path";
+function sidecarPath(roomId, repopath, home) {
+  for (const [label, raw] of [["roomId", roomId], ["repopath", repopath]]) {
+    let decoded;
+    try {
+      decoded = decodeURIComponent(raw);
+    } catch {
+      decoded = raw;
+    }
+    if (decoded === "." || decoded === ".." || decoded.split(/[/\\]/).some((seg) => seg === "..")) {
+      throw new Error(`sidecarPath: illegal ${label} "${raw}"`);
+    }
+  }
+  return path2.join(home ?? meshHome(), "edit-base", roomId, encodeURIComponent(repopath));
+}
+function readSidecar(roomId, repopath, home) {
+  const p = sidecarPath(roomId, repopath, home);
+  if (!fs2.existsSync(p))
+    return;
+  try {
+    fs2.chmodSync(p, 384);
+  } catch {}
+  try {
+    return JSON.parse(fs2.readFileSync(p, "utf8"));
+  } catch {
+    return;
+  }
+}
+function writeSidecar(roomId, repopath, sidecar, home) {
+  const p = sidecarPath(roomId, repopath, home);
+  const dir = path2.dirname(p);
+  fs2.mkdirSync(dir, { recursive: true, mode: 448 });
+  fs2.writeFileSync(p, JSON.stringify(sidecar), { encoding: "utf8", mode: 384 });
+  try {
+    fs2.chmodSync(p, 384);
+  } catch {}
+  try {
+    fs2.chmodSync(dir, 448);
+  } catch {}
+}
+function isValidUtf8Bytes(bytes) {
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function isValidUtf8Text(s) {
+  if (s.includes("�"))
+    return false;
+  for (let i = 0;i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 55296 && c <= 56319) {
+      const next = s.charCodeAt(i + 1);
+      if (Number.isNaN(next) || next < 56320 || next > 57343)
+        return false;
+      i++;
+    } else if (c >= 56320 && c <= 57343) {
+      return false;
+    }
+  }
+  return true;
+}
+var CONFLICT_MARKER_RE = /^(<{7}( |$)|={7}$|>{7}( |$))/m;
+function hasConflictMarkers(text) {
+  return CONFLICT_MARKER_RE.test(text);
+}
+function hasPreExistingConflictMarkers(localBytes) {
+  if (localBytes === undefined)
+    return false;
+  if (!isValidUtf8Bytes(localBytes))
+    return false;
+  return hasConflictMarkers(localBytes.toString("utf8"));
+}
+function decideEditWrite(input) {
+  const { sidecar, tipText, tipHash, localBytes } = input;
+  if (localBytes === undefined) {
+    return { kind: "clean", text: tipText, sidecar: { content: tipText, tip_hash: tipHash } };
+  }
+  if (sidecar !== undefined && localBytes.equals(Buffer.from(sidecar.content, "utf8"))) {
+    return { kind: "clean", text: tipText, sidecar: { content: tipText, tip_hash: tipHash } };
+  }
+  const base = sidecar?.content ?? tipText;
+  if (!isValidUtf8Bytes(localBytes) || !isValidUtf8Text(base) || !isValidUtf8Text(tipText)) {
+    return {
+      kind: "binary",
+      warning: `fs edit: local file has diverged and looks like binary content — resolve manually (not merged, local file left untouched)`
+    };
+  }
+  const localText = localBytes.toString("utf8");
+  const merge = threeWayMerge(base, tipText, localText);
+  if (merge.ok) {
+    const result = {
+      kind: "merged",
+      text: merge.merged,
+      sidecar: { content: merge.merged, tip_hash: tipHash }
+    };
+    if (sidecar === undefined) {
+      result.warning = "fs edit: no prior sidecar found — kept local edits, merged against the room tip";
+    }
+    return result;
+  }
+  return {
+    kind: "conflict",
+    text: merge.conflicted,
+    warning: "fs edit: local edits conflict with the room tip — conflict markers written, resolve manually"
+  };
+}
+function decideFoldBack(conflictBaseText, currentDocText, localText) {
+  if (currentDocText === conflictBaseText) {
+    return { kind: "clean", text: localText };
+  }
+  const merge = threeWayMerge(conflictBaseText, currentDocText, localText);
+  if (merge.ok) {
+    return {
+      kind: "merged",
+      text: merge.merged,
+      warning: "fs edit: room tip advanced while conflict markers were being resolved — remote edits auto-merged"
+    };
+  }
+  return {
+    kind: "conflict",
+    text: merge.conflicted,
+    warning: "fs edit: room tip advanced and overlaps your resolution — new conflict markers written, resolve again before publishing"
+  };
+}
+
+// src/watch-auto.ts
+function isExactPathWatch(predicate, path3) {
+  if (predicate.kind !== "entry")
+    return false;
+  const p = predicate;
+  return p.path === path3 && p.performative === undefined && p.thread === undefined && p.mention_me === undefined && p.participant === undefined;
+}
+async function subscribePathWatch(client, path3) {
+  const result = await client.postWatch({ kind: "entry", path: path3 });
+  if (!result.ok)
+    return { ok: false, error: result.error, detail: result.detail };
+  return { ok: true };
+}
+async function unsubscribePathWatch(client, path3) {
+  try {
+    const watches = await client.getWatches();
+    const mine = watches.find((w) => isExactPathWatch(w.predicate, path3));
+    if (!mine)
+      return false;
+    await client.deleteWatch(mine.id);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function extractLockHolder(detail) {
+  const m = /is locked by '([^']+)'/.exec(detail);
+  return m?.[1];
+}
+
+// src/fs-edit.ts
 function flag(args2, name) {
   const v = args2.flags[name];
   return typeof v === "string" ? v : undefined;
@@ -7776,11 +7964,84 @@ async function fsCmdEdit(client, args2, _senderId) {
     await followTask;
     die("fs edit: path escapes target directory");
   }
-  mkdirSync3(dirname3(fsDest), { recursive: true });
-  writeFileSync2(fsDest, docToText(editState.doc), "utf8");
-  ok(`fs edit: loaded ${repopath} → ${fsDest}`);
+  mkdirSync4(dirname4(fsDest), { recursive: true });
+  const roomId = client.roomId;
+  const tipText = docToText(editState.doc);
+  let localBytes;
+  try {
+    localBytes = readFileSync3(fsDest);
+  } catch {
+    localBytes = undefined;
+  }
+  if (hasPreExistingConflictMarkers(localBytes)) {
+    ac.abort();
+    await followTask;
+    die(`fs edit: ${repopath} contains unresolved conflict markers from a previous session — resolve them (or delete the local file) and re-run`);
+  }
+  const decision = decideEditWrite({
+    sidecar: readSidecar(roomId, repopath),
+    tipText,
+    tipHash: nodeHashRef ?? "",
+    localBytes
+  });
+  let conflictPending = false;
+  let conflictBaseText = "";
+  switch (decision.kind) {
+    case "binary":
+      ok(decision.warning);
+      break;
+    case "clean":
+      writeFileSync3(fsDest, decision.text, "utf8");
+      writeSidecar(roomId, repopath, decision.sidecar);
+      ok(`fs edit: loaded ${repopath} → ${fsDest}`);
+      break;
+    case "merged":
+      setText(editState.doc, decision.text);
+      writeFileSync3(fsDest, decision.text, "utf8");
+      writeSidecar(roomId, repopath, decision.sidecar);
+      if (decision.warning)
+        ok(decision.warning);
+      ok(`fs edit: loaded ${repopath} → ${fsDest} (local edits merged with room tip)`);
+      break;
+    case "conflict":
+      writeFileSync3(fsDest, decision.text, "utf8");
+      conflictPending = true;
+      conflictBaseText = tipText;
+      ok(decision.warning);
+      ok(`fs edit: loaded ${repopath} → ${fsDest} (conflict markers written — resolve before publishing)`);
+      break;
+  }
+  const watchSub = await subscribePathWatch(client, repopath);
+  if (!watchSub.ok)
+    ok(`fs edit: warning — watch registration failed [${watchSub.error}] ${watchSub.detail} — you will not be notified of conflicts`);
   await client.relay(repopath, encodeStateB64(editState.doc));
   const publishSnapshot = async () => {
+    let localText;
+    try {
+      localText = readFileSync3(fsDest, "utf8");
+    } catch {
+      localText = docToText(editState.doc);
+    }
+    if (hasConflictMarkers(localText)) {
+      ok("fs edit: conflict markers present — resolve before publishing (skipped this flush)");
+      return;
+    }
+    if (conflictPending) {
+      const currentDocText = docToText(editState.doc);
+      const fold = decideFoldBack(conflictBaseText, currentDocText, localText);
+      if (fold.kind === "conflict") {
+        writeFileSync3(fsDest, fold.text, "utf8");
+        ok(fold.warning);
+        return;
+      }
+      if (fold.kind === "merged") {
+        writeFileSync3(fsDest, fold.text, "utf8");
+        ok(fold.warning);
+      }
+      setText(editState.doc, fold.text);
+      conflictPending = false;
+      conflictBaseText = fold.text;
+    }
     const snapBytes = snapshotToBytes(editState.doc);
     const snapHash = sha256hex(snapBytes);
     const up = await client.putArtifact(snapHash, snapBytes);
@@ -7798,6 +8059,7 @@ async function fsCmdEdit(client, args2, _senderId) {
     const r = await client.postEntry({ performative: "file.write", data: postData });
     if (r.ok) {
       nodeHashRef = "r2:" + snapHash;
+      writeSidecar(roomId, repopath, { content: docToText(editState.doc), tip_hash: nodeHashRef });
       ok(`fs edit: snapshot published (r2:${snapHash}, seq=${r.seq})`);
     } else {
       ok(`fs edit: snapshot post failed: [${r.error}]`);
@@ -7811,6 +8073,7 @@ async function fsCmdEdit(client, args2, _senderId) {
     ac.abort();
     await followTask;
     await publishSnapshot();
+    await unsubscribePathWatch(client, repopath);
     process.exit(0);
   };
   process.once("SIGINT", () => {
@@ -7822,6 +8085,7 @@ async function fsCmdEdit(client, args2, _senderId) {
   await followTask;
   clearInterval(snapshotInterval);
   await publishSnapshot();
+  await unsubscribePathWatch(client, repopath);
 }
 
 // src/fs-acl.ts
@@ -7836,17 +8100,27 @@ function ok2(msg) {
 }
 async function fsCmdGrant(client, args2, _senderId) {
   const subject = args2.positional[0];
-  const path2 = args2.positional[1];
+  const path3 = args2.positional[1];
   const grade = args2.positional[2];
-  if (!subject || !path2 || !grade)
+  if (!subject || !path3 || !grade)
     die2("fs grant: <subject> <path> <grade> are required");
   if (!isAccessGrade(grade)) {
     die2("fs grant: grade must be discover|read|write|exclusive");
   }
-  const r = await client.grant(subject, path2, grade);
+  const r = await client.grant(subject, path3, grade);
   if (!r.ok)
     die2(`fs grant: [${r.error}] ${r.detail}${r.hint ? " — " + r.hint : ""}`);
-  ok2(`fs grant ${grade} on ${path2} → ${subject} (seq=${r.seq})`);
+  ok2(`fs grant ${grade} on ${path3} → ${subject} (seq=${r.seq})`);
+}
+async function fsCmdRevoke(client, args2, _senderId) {
+  const subject = args2.positional[0];
+  const path3 = args2.positional[1];
+  if (!subject || !path3)
+    die2("fs revoke: <subject> <path> are required");
+  const r = await client.revokeGrant(subject, path3);
+  if (!r.ok)
+    die2(`fs revoke: [${r.error}] ${r.detail}${r.hint ? " — " + r.hint : ""}`);
+  ok2(`fs revoke: removed grant on ${path3} from ${subject} (seq=${r.seq})`);
 }
 async function fsCmdGrants(client, _args, _senderId) {
   const grants = await client.listGrants();
@@ -7869,6 +8143,16 @@ async function fsCmdRole(client, args2, _senderId) {
   if (!r.ok)
     die2(`fs role: [${r.error}] ${r.detail}${r.hint ? " — " + r.hint : ""}`);
   ok2(`fs role ${participant} → ${role} (seq=${r.seq})`);
+}
+async function fsCmdRoleRm(client, args2, _senderId) {
+  const participant = args2.positional[0];
+  const role = args2.positional[1];
+  if (!participant || !role)
+    die2("fs role-rm: <participant> <role> are required");
+  const r = await client.removeRole(participant, role);
+  if (!r.ok)
+    die2(`fs role-rm: [${r.error}] ${r.detail}${r.hint ? " — " + r.hint : ""}`);
+  ok2(`fs role-rm: unbound ${participant} from ${role} (seq=${r.seq})`);
 }
 async function fsCmdRoles(client, _args, _senderId) {
   const roles = await client.listRoles();
@@ -7893,6 +8177,15 @@ async function fsCmdLeases(client, _args, _senderId) {
     return;
   }
   ok2(renderLeases(leases));
+}
+async function fsCmdConfig(client, args2, _senderId) {
+  const access = args2.positional[0];
+  if (access !== "open" && access !== "closed")
+    die2("fs config: <open|closed> is required");
+  const r = await client.setDefaultAccess(access);
+  if (!r.ok)
+    die2(`fs config: [${r.error}] ${r.detail}${r.hint ? " — " + r.hint : ""}`);
+  ok2(`fs config: default_access → ${access} (seq=${r.seq})`);
 }
 
 // src/main.ts
@@ -7998,8 +8291,8 @@ async function hydrateGrepWinners(client, paths, into) {
 `);
       continue;
     }
-    mkdirSync4(dirname4(dest), { recursive: true });
-    writeFileSync3(dest, blob);
+    mkdirSync5(dirname5(dest), { recursive: true });
+    writeFileSync4(dest, blob);
     ok3(dest);
   }
 }
@@ -8033,8 +8326,8 @@ async function hydrateSubtree(client, prefix, into) {
 `);
       continue;
     }
-    mkdirSync4(dirname4(dest), { recursive: true });
-    writeFileSync3(dest, blob);
+    mkdirSync5(dirname5(dest), { recursive: true });
+    writeFileSync4(dest, blob);
     written.push(dest);
   }
   return written;
@@ -8318,10 +8611,10 @@ async function cmdRoomInvite(args2) {
   }
 }
 function isFilePlaneEntry(performative) {
-  return performative.startsWith("file.") || performative === "system.grant" || performative === "system.role";
+  return performative.startsWith("file.") || performative === "system.grant" || performative === "system.role" || performative === "system.lease_clear" || performative === "system.revoke" || performative === "system.config";
 }
 function flagOutOfScope(closure, canRead) {
-  return closure.map((path2) => ({ path: path2, readable: canRead(path2) }));
+  return closure.map((path3) => ({ path: path3, readable: canRead(path3) }));
 }
 async function cmdLog(args2) {
   const follow = flagBool(args2, "f");
@@ -8647,7 +8940,7 @@ async function cmdFetch(args2) {
   if (!(bytes instanceof Uint8Array))
     die3(`fetch: [${bytes.error}] ${bytes.detail}${bytes.hint ? " — " + bytes.hint : ""}`);
   const name = arg.startsWith("r2:") ? ref.hash : arg;
-  const dest = resolve2(flag2(args2, "into") ?? join3(home ?? meshHome(), "artifacts", name));
+  const dest = resolve2(flag2(args2, "into") ?? join4(home ?? meshHome(), "artifacts", name));
   await unpackInto(bytes, dest);
   ok3(`Extracted to ${dest}`);
 }
@@ -8657,11 +8950,11 @@ var FS_CMDS = {
     if (!localPath)
       die3("fs put: <path> is required");
     const as = flag2(args2, "as") ?? localPath;
-    const bytes = new Uint8Array(readFileSync2(localPath));
+    const bytes = new Uint8Array(readFileSync4(localPath));
     const result = await fsPutOcc(client, as, bytes);
     if (!result.ok) {
       if (result.kind === "conflict") {
-        writeFileSync3(localPath, result.conflictedText, "utf8");
+        writeFileSync4(localPath, result.conflictedText, "utf8");
         die3(`fs put: merge conflict in ${as} — conflict markers written to ${localPath}`);
       }
       die3(`fs put: [${result.error}]${result.detail ? " " + result.detail : ""}${result.hint ? " — " + result.hint : ""}`);
@@ -8703,8 +8996,8 @@ var FS_CMDS = {
     const dest = resolve2(into, node.path);
     if (dest !== base && !dest.startsWith(base + sep2))
       die3("fs get: path escapes target directory");
-    mkdirSync4(dirname4(dest), { recursive: true });
-    writeFileSync3(dest, blob);
+    mkdirSync5(dirname5(dest), { recursive: true });
+    writeFileSync4(dest, blob);
     ok3(dest);
   },
   rm: async (client, args2) => {
@@ -8722,9 +9015,20 @@ var FS_CMDS = {
     if (!repopath)
       die3("fs lock: <path> is required");
     const r = await client.postEntry({ performative: "file.lock", data: { path: repopath } });
-    if (!r.ok)
+    if (!r.ok) {
+      if (r.error === "path_locked") {
+        const holder = extractLockHolder(r.detail) ?? "another participant";
+        const sub2 = await subscribePathWatch(client, repopath);
+        if (!sub2.ok)
+          ok3(`fs lock: warning — watch registration failed [${sub2.error}] ${sub2.detail} — you will not be notified of conflicts`);
+        die3(`fs lock: path '${repopath}' is locked by '${holder}' — you will be notified when it frees`);
+      }
       die3(`fs lock: [${r.error}] ${r.detail}${r.hint ? " — " + r.hint : ""}`);
+    }
     ok3(`fs lock ${repopath} (seq=${r.seq})`);
+    const sub = await subscribePathWatch(client, repopath);
+    if (!sub.ok)
+      ok3(`fs lock: warning — lock succeeded but watch registration failed [${sub.error}] ${sub.detail} — you will not be notified of conflicts`);
   },
   unlock: async (client, args2) => {
     const repopath = args2.positional[0];
@@ -8734,6 +9038,7 @@ var FS_CMDS = {
     if (!r.ok)
       die3(`fs unlock: [${r.error}] ${r.detail}${r.hint ? " — " + r.hint : ""}`);
     ok3(`fs unlock ${repopath} (seq=${r.seq})`);
+    await unsubscribePathWatch(client, repopath);
   },
   grep: async (client, args2) => {
     const query = args2.positional[0];
@@ -8823,9 +9128,12 @@ var FS_CMDS = {
   },
   grant: fsCmdGrant,
   grants: fsCmdGrants,
+  revoke: fsCmdRevoke,
   role: fsCmdRole,
   roles: fsCmdRoles,
+  "role-rm": fsCmdRoleRm,
   leases: fsCmdLeases,
+  config: fsCmdConfig,
   deps: async (client, args2, senderId) => {
     const entryPath = args2.positional[0];
     if (!entryPath)
@@ -8871,9 +9179,9 @@ var FS_CMDS = {
       return;
     }
     const flagged = flagOutOfScope(closure, canRead);
-    for (const { path: path2, readable } of flagged) {
-      const tag = readable ? "[readable]" : "[unreadable — run: mesh fs request " + path2 + "]";
-      ok3(`  ${path2}  ${tag}`);
+    for (const { path: path3, readable } of flagged) {
+      const tag = readable ? "[readable]" : "[unreadable — run: mesh fs request " + path3 + "]";
+      ok3(`  ${path3}  ${tag}`);
     }
   },
   request: async (client, args2) => {
@@ -8906,7 +9214,7 @@ async function cmdFs(args2) {
   });
   const handler = sub ? FS_CMDS[sub] : undefined;
   if (!handler) {
-    die3(`usage: mesh fs put <path> [--as <repopath>] | ls [<prefix>] | get <repopath> [--into <dir>] | rm <repopath> | edit <path> [--into <dir>] | lock <path> | unlock <path> | grep <query> [--prefix <path-prefix>] [--limit <n>] [--hydrate [--into <dir>]] | hydrate [<prefix>] [--into <dir>] | grant <subject> <path> <grade> | grants | role <participant> <role> | roles | leases | deps <path> | request <path> [--grade read]
+    die3(`usage: mesh fs put <path> [--as <repopath>] | ls [<prefix>] | get <repopath> [--into <dir>] | rm <repopath> | edit <path> [--into <dir>] | lock <path> | unlock <path> | grep <query> [--prefix <path-prefix>] [--limit <n>] [--hydrate [--into <dir>]] | hydrate [<prefix>] [--into <dir>] | grant <subject> <path> <grade> | grants | revoke <subject> <path> | role <participant> <role> | roles | role-rm <participant> <role> | leases | config <open|closed> | deps <path> | request <path> [--grade read]
   write policy by extension: code (.ts .js .py .go .rs …) -> merge on \`put\` · prose (.md .txt) -> shared CRDT via \`edit\` · opt-in serialize: \`lock\`/\`unlock\`
   grades: discover < read < write < exclusive`);
   }
@@ -8970,13 +9278,16 @@ async function cmdWatch(args2) {
     const perf = flag2(args2, "performative");
     const thread = flag2(args2, "thread");
     const mentionMe = flagBool(args2, "mention-me");
-    predicate = { kind: "entry" };
-    if (perf)
-      predicate.performative = perf;
-    if (thread)
-      predicate.thread = thread;
-    if (mentionMe)
-      predicate.mention_me = true;
+    const path3 = flag2(args2, "path");
+    const participant = flag2(args2, "participant");
+    predicate = {
+      kind: "entry",
+      ...perf !== undefined ? { performative: perf } : {},
+      ...thread !== undefined ? { thread } : {},
+      ...mentionMe ? { mention_me: true } : {},
+      ...path3 !== undefined ? { path: path3 } : {},
+      ...participant !== undefined ? { participant } : {}
+    };
   } else {
     die3('watch: sub-command must be "task" or "entry"');
   }
@@ -9085,7 +9396,7 @@ tasks:
   fetch <task|r2:hash> [--into <dir>]                       Download + extract a delivered artifact
   watch task <task_ref> <STATE>                             Register a task-state watch
   watch entry [--performative P] [--thread T]               Register an entry watch
-            [--mention-me]
+            [--mention-me] [--path <p>] [--participant <id>]
 
 files:
   fs put <path> [--as <repopath>]                           Upload file to the shared workspace (OCC merge-on-write)
@@ -9096,13 +9407,16 @@ files:
   fs lock <path>                                            Acquire exclusive lease (file.lock)
   fs unlock <path>                                          Release exclusive lease (file.unlock)
   fs grep <query> [--prefix p] [--limit n] [--hydrate]     Search file content; --hydrate fetches matched files
-  fs log [-f]                                               Show workspace changes (file.*, system.grant/role) (-f: follow)
+  fs log [-f]                                               Show workspace changes (file.*, system.grant/role/revoke/lease_clear/config) (-f: follow)
   fs hydrate [<prefix>] [--into <dir>]                      Bulk-download subtree to disk (default: .mesh/fs)
   fs grant <subject> <path> <grade>                         Issue a path grant (owner only; grade: discover|read|write|exclusive)
   fs grants                                                 List all path grants in the room
+  fs revoke <subject> <path>                                Revoke a previously issued path grant (owner only)
   fs role <participant> <role>                              Bind a participant to a file-plane role (owner only)
   fs roles                                                  List all role bindings in the room
+  fs role-rm <participant> <role>                           Unbind a participant's file-plane role (owner only)
   fs leases                                                 List all active file leases
+  fs config <open|closed>                                   Set the room's default_access posture (owner only)
   fs deps <path>                                            Walk a file's import closure; flag deps you can't read
   fs request <path> [--grade read]                          Post an advisory access request for a path
 

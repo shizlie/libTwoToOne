@@ -13581,7 +13581,7 @@ var require_dist = __commonJS((exports, module) => {
 });
 
 // src/main.ts
-import { readFileSync as readFileSync5, existsSync as existsSync4, statSync as statSync3 } from "node:fs";
+import { readFileSync as readFileSync5, existsSync as existsSync4, statSync as statSync4 } from "node:fs";
 import { mkdirSync as mkdirSync3, openSync, writeFileSync as writeFileSync3, rmSync as rmSync2, realpathSync as realpathSync2 } from "node:fs";
 import { join as join4, resolve as resolve2 } from "node:path";
 import { homedir as homedir2 } from "node:os";
@@ -13848,9 +13848,32 @@ function validateConfig(raw) {
   if (typeof rh["interval_s"] !== "number")
     throw new ConfigError("heartbeat.interval_s is required (number)");
   const heartbeat = { interval_s: rh["interval_s"] };
+  const liveness = {
+    publish: true,
+    interval_s: 300,
+    stuck_after_s: 300,
+    debounce_s: 60
+  };
+  if (r["liveness"] !== undefined) {
+    if (!isObj(r["liveness"]))
+      throw new ConfigError("liveness must be a mapping");
+    const rl = r["liveness"];
+    if (rl["publish"] !== undefined) {
+      if (typeof rl["publish"] !== "boolean")
+        throw new ConfigError("liveness.publish must be a boolean");
+      liveness.publish = rl["publish"];
+    }
+    for (const k of ["interval_s", "stuck_after_s", "debounce_s"]) {
+      if (rl[k] !== undefined) {
+        if (typeof rl[k] !== "number")
+          throw new ConfigError(`liveness.${k} must be a number`);
+        liveness[k] = rl[k];
+      }
+    }
+  }
   if (typeof r["state_dir"] !== "string")
     throw new ConfigError("state_dir is required (string)");
-  return { identity: identity2, room, subscriptions, gate, wake, heartbeat, state_dir: r["state_dir"] };
+  return { identity: identity2, room, subscriptions, gate, wake, heartbeat, liveness, state_dir: r["state_dir"] };
 }
 function loadConfig(path) {
   let text;
@@ -14759,6 +14782,7 @@ var PERFORMATIVE_SET = {
   accept: true,
   reject: true,
   escalate: true,
+  signal: true,
   "file.write": true,
   "file.delete": true,
   "file.lock": true,
@@ -14822,6 +14846,9 @@ function matchesWatch(watch, entry) {
     } else if (perf === "system.revoke") {
       const role = data?.["role"];
       if (role?.participant !== watch.participant)
+        return false;
+    } else if (perf === "signal") {
+      if (sub.sender !== watch.participant)
         return false;
     } else {
       return false;
@@ -15228,6 +15255,151 @@ class Heartbeater {
   }
 }
 
+// src/liveness.ts
+import { statSync } from "node:fs";
+function assessCondition(i) {
+  if (i.heldCount === 0)
+    return null;
+  if (i.probe === "gone")
+    return "gone";
+  const appendFresh = i.msSinceSelfAppend <= i.stuckAfterMs;
+  const hookFresh = i.hookFreshMs !== null && i.hookFreshMs <= i.stuckAfterMs;
+  if (i.probe === "busy")
+    return hookFresh || appendFresh ? "working" : "stuck";
+  return appendFresh ? "working" : "stuck";
+}
+
+class LivenessMonitor {
+  client;
+  injector;
+  selfId;
+  opts;
+  onError;
+  onFatal;
+  _stopRequested = false;
+  _wakeUp = null;
+  _loopPromise = null;
+  lastPublished = null;
+  lastPublishMs = 0;
+  lastSeenSeq = undefined;
+  lastAppendMs = null;
+  disabled = false;
+  warnedLatency = false;
+  constructor(client, injector, selfId, opts, onError = (e) => {
+    console.error("[liveness] tick error:", e);
+  }, onFatal = () => {}) {
+    this.client = client;
+    this.injector = injector;
+    this.selfId = selfId;
+    this.opts = opts;
+    this.onError = onError;
+    this.onFatal = onFatal;
+  }
+  start() {
+    if (this._loopPromise !== null)
+      return;
+    this._stopRequested = false;
+    this._loopPromise = this._loop();
+  }
+  async stop() {
+    this._stopRequested = true;
+    this._wakeUp?.();
+    await this._loopPromise;
+    this._loopPromise = null;
+  }
+  async _sleep(ms) {
+    const { promise, resolve } = Promise.withResolvers();
+    this._wakeUp = resolve;
+    const handle = setTimeout(resolve, ms);
+    await promise;
+    clearTimeout(handle);
+    this._wakeUp = null;
+  }
+  async _loop() {
+    while (!this._stopRequested) {
+      await this._sleep(this.opts.intervalMs);
+      if (this._stopRequested)
+        break;
+      try {
+        await this._tick();
+      } catch (err2) {
+        if (isRoomGone(err2)) {
+          this._stopRequested = true;
+          this.onFatal(err2);
+          break;
+        }
+        this.onError(err2);
+      }
+    }
+  }
+  async _tick() {
+    if (this.disabled)
+      return;
+    const state = await this.client.getState();
+    const now = Date.now();
+    if (!this.warnedLatency && this.opts.intervalMs + this.opts.stuckAfterMs + this.opts.debounceMs >= state.defaults.lease_ttl_s * 1000) {
+      this.warnedLatency = true;
+      this.onError(new Error(`[liveness] detection latency (interval+stuck_after+debounce) >= lease_ttl_s (${state.defaults.lease_ttl_s}s) — stuck would surface no earlier than lease death (S-F2)`));
+    }
+    const me = state.roster.find((r) => r.participant_id === this.selfId);
+    const seen = me?.last_seen_seq ?? undefined;
+    if (seen !== undefined && seen !== this.lastSeenSeq) {
+      this.lastSeenSeq = seen;
+      this.lastAppendMs = now;
+    }
+    const held = state.claims.filter((c) => c.state === "CLAIMED" && c.holder === this.selfId);
+    const probe = await this.injector.probe();
+    const cond = assessCondition({
+      probe,
+      heldCount: held.length,
+      msSinceSelfAppend: this.lastAppendMs === null ? Infinity : now - this.lastAppendMs,
+      hookFreshMs: this._hookAgeMs(now),
+      stuckAfterMs: this.opts.stuckAfterMs
+    });
+    if (cond === null) {
+      this.lastPublished = null;
+      return;
+    }
+    if (cond === this.lastPublished)
+      return;
+    if (now - this.lastPublishMs < this.opts.debounceMs)
+      return;
+    const res = await this.client.postEntry({
+      performative: "signal",
+      data: { condition: cond }
+    });
+    if ("error" in res) {
+      if (res.error === "invalid_performative") {
+        this.disabled = true;
+        this.onError(new Error("[liveness] room does not support signal — publishing disabled"));
+        return;
+      }
+      this.onError(new Error(`[liveness] publish failed: ${res.error}`));
+      return;
+    }
+    this.lastSeenSeq = res.seq;
+    this.lastPublished = cond;
+    this.lastPublishMs = now;
+  }
+  _hookAgeMs(now) {
+    if (this.opts.hookStateFile === null)
+      return null;
+    try {
+      return now - statSync(this.opts.hookStateFile).mtimeMs;
+    } catch {
+      return null;
+    }
+  }
+}
+function checkLivenessCadence(cfg) {
+  if (!cfg.publish)
+    return null;
+  if (cfg.debounce_s >= cfg.stuck_after_s) {
+    return `liveness.debounce_s (${cfg.debounce_s}) >= liveness.stuck_after_s (${cfg.stuck_after_s}) — transitions may be suppressed`;
+  }
+  return null;
+}
+
 // src/injectors/tmux.ts
 import { execFile } from "node:child_process";
 function runTmux(args) {
@@ -15328,7 +15500,7 @@ function createOmpInjector(opts) {
 }
 
 // src/injectors/state.ts
-import { statSync, readFileSync as readFileSync3 } from "node:fs";
+import { statSync as statSync2, readFileSync as readFileSync3 } from "node:fs";
 var AGENT_STATE_FILE = "agent_state";
 function readHookState(file, busyStaleMs) {
   let raw;
@@ -15342,7 +15514,7 @@ function readHookState(file, busyStaleMs) {
   if (raw !== "busy")
     return null;
   try {
-    const ageMs = Date.now() - statSync(file).mtimeMs;
+    const ageMs = Date.now() - statSync2(file).mtimeMs;
     return ageMs <= busyStaleMs ? "busy" : null;
   } catch {
     return null;
@@ -15739,7 +15911,7 @@ class MeshClient {
 
 // src/ipc.ts
 import { createServer } from "node:net";
-import { existsSync as existsSync3, unlinkSync, statSync as statSync2, chmodSync as chmodSync3 } from "node:fs";
+import { existsSync as existsSync3, unlinkSync, statSync as statSync3, chmodSync as chmodSync3 } from "node:fs";
 import { basename as pathBasename } from "node:path";
 
 // src/fs-shim.ts
@@ -16237,7 +16409,7 @@ function startIpcServer(opts) {
       abortServer(`chmod 0600 failed: ${String(err2)}`);
       return;
     }
-    const mode = statSync2(socketPath).mode & 511;
+    const mode = statSync3(socketPath).mode & 511;
     if ((mode & 63) !== 0) {
       abortServer(`socket mode is ${mode.toString(8)}, expected 0600 — aborting`);
       return;
@@ -29498,6 +29670,9 @@ function createMcpServer(socketPath) {
 ` + `• accept   — approve a DELIVERED task (verdict authority only → DONE, terminal).
 ` + `• reject   — reject a DELIVERED task back to ANNOUNCED.  Body MUST state the reason.
 ` + `• release  — voluntarily drop a CLAIMED task back to ANNOUNCED.  Use when blocked.
+` + `• signal   — liveness condition transition (data: {condition:"working"|"stuck"|"gone"});
+` + `             never transitions a task; normally published by the daemon, not by agents.
+
 ` + `• file.write  — upsert a file in the room's metadata tree.
 ` + `               data: {path: "src/foo.ts", content_hash: "r2:<64-hex-sha256>", size: <bytes>}
 ` + `               Upload the blob first via the artifact endpoint; content_hash is r2:<sha256>.
@@ -29526,6 +29701,7 @@ function createMcpServer(socketPath) {
         "release",
         "accept",
         "reject",
+        "signal",
         "file.write",
         "file.delete",
         "file.lock",
@@ -29989,6 +30165,14 @@ function checkHeartbeatCadence(intervalS, leaseTtlS) {
     return null;
   return `[meshl] heartbeat.interval_s (${intervalS}) >= room lease_ttl_s ` + `(${leaseTtlS}) — file/task leases will expire between heartbeats`;
 }
+function livenessOptsFrom(config2, stateDir) {
+  return {
+    intervalMs: config2.liveness.interval_s * 1000,
+    stuckAfterMs: config2.liveness.stuck_after_s * 1000,
+    debounceMs: config2.liveness.debounce_s * 1000,
+    hookStateFile: config2.wake.tmux ? join4(stateDir, AGENT_STATE_FILE) : null
+  };
+}
 async function cmdRun(configPath, opts) {
   const config2 = loadConfig(configPath);
   const { secretBytes } = loadSecretBytes(config2);
@@ -30038,6 +30222,9 @@ async function cmdRun(configPath, opts) {
   } catch (err2) {
     console.error("[meshl] startup getState failed (heartbeat/TTL check skipped):", err2);
   }
+  const livenessWarn = checkLivenessCadence(config2.liveness);
+  if (livenessWarn !== null)
+    console.warn(`[meshl] ${livenessWarn}`);
   const socketPath = join4(stateDir, "daemon.sock");
   const cache = new WorkspaceCache(join4(stateDir, "fs", config2.room.id), client);
   const ipcHandle = await startIpcServer({
@@ -30056,6 +30243,10 @@ async function cmdRun(configPath, opts) {
       console.error("[meshl] heartbeat error:", err2);
     });
     heartbeater2.start();
+    const liveness2 = config2.liveness.publish ? new LivenessMonitor(client, noopInjector, config2.identity.id, livenessOptsFrom(config2, stateDir), (err2) => {
+      console.error("[meshl] liveness error:", err2);
+    }) : null;
+    liveness2?.start();
     const { promise: promise2, resolve: resolve3 } = Promise.withResolvers();
     const shutdown2 = () => {
       console.log("[meshl] stopping...");
@@ -30065,6 +30256,7 @@ async function cmdRun(configPath, opts) {
     process.once("SIGTERM", shutdown2);
     console.log(`[meshl] running (pull-only/mcp) — room=${config2.room.id} id=${config2.identity.id} socket=${socketPath}`);
     await promise2;
+    await liveness2?.stop();
     await heartbeater2.stop();
     await ipcHandle.close();
     console.log("[meshl] stopped");
@@ -30156,6 +30348,10 @@ async function cmdRun(configPath, opts) {
     console.error("[meshl] heartbeat error:", err2);
   }, onRoomGone);
   heartbeater.start();
+  const liveness = config2.liveness.publish ? new LivenessMonitor(client, injector, config2.identity.id, livenessOptsFrom(config2, stateDir), (err2) => {
+    console.error("[meshl] liveness error:", err2);
+  }, onRoomGone) : null;
+  liveness?.start();
   const shutdown = () => {
     console.log("[meshl] stopping...");
     consumer.stop();
@@ -30166,6 +30362,7 @@ async function cmdRun(configPath, opts) {
   process.once("SIGTERM", shutdown);
   console.log(`[meshl] running — room=${config2.room.id} id=${config2.identity.id} socket=${socketPath}`);
   await consumer.start();
+  await liveness?.stop();
   await heartbeater.stop();
   await ipcHandle.close();
   try {
@@ -30312,7 +30509,7 @@ async function cmdStatus(configPath) {
     const stateFile = join4(stateDir, AGENT_STATE_FILE);
     try {
       const raw = readFileSync5(stateFile, "utf8").trim();
-      const ageS = Math.round((Date.now() - statSync3(stateFile).mtimeMs) / 1000);
+      const ageS = Math.round((Date.now() - statSync4(stateFile).mtimeMs) / 1000);
       hookState = raw === "busy" && ageS * 1000 > staleMs ? `busy (age ${ageS}s — STALE > ${Math.round(staleMs / 1000)}s, ignored → scrape)` : `${raw} (age ${ageS}s)`;
     } catch {
       hookState = `<none> — no hook installed; using scrape fallback (install: meshl hooks)`;

@@ -1000,6 +1000,7 @@ var PERFORMATIVE_SET = {
   accept: true,
   reject: true,
   escalate: true,
+  signal: true,
   "file.write": true,
   "file.delete": true,
   "file.lock": true,
@@ -1822,12 +1823,14 @@ function renderTable(headers, rows) {
 function renderRoster(rows) {
   const dash = (s) => s === undefined || s === "" ? "-" : String(s);
   const short = (pk) => pk.replace(/^ed25519-pk:/, "").slice(0, 8);
-  return renderTable(["id", "team", "host", "roles", "last", "pubkey"], rows.map((r) => [
+  return renderTable(["id", "team", "host", "roles", "last", "cond", "cond@seq", "pubkey"], rows.map((r) => [
     r.participant_id,
     dash(r.owner_team),
     dash(r.host),
     r.roles.length ? r.roles.join(",") : "-",
     dash(r.last_seen_seq),
+    dash(r.condition ?? undefined),
+    dash(r.condition_seq ?? undefined),
     short(r.pubkey)
   ]));
 }
@@ -9255,6 +9258,8 @@ async function cmdState(args2) {
     owner_team: p.card.owner_team,
     host: p.card.host,
     last_seen_seq: p.last_seen_seq,
+    condition: p.condition,
+    condition_seq: p.condition_seq,
     pubkey: p.pubkey
   }));
   ok3(renderRoster(rosterRows));

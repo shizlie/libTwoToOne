@@ -14783,6 +14783,7 @@ var PERFORMATIVE_SET = {
   reject: true,
   escalate: true,
   signal: true,
+  "key.rotate": true,
   "file.write": true,
   "file.delete": true,
   "file.lock": true,
@@ -14796,7 +14797,10 @@ var PERFORMATIVE_SET = {
   "system.role": true,
   "system.config": true,
   "system.lease_clear": true,
-  "system.revoke": true
+  "system.revoke": true,
+  "decide.request": true,
+  "decide.resolve": true,
+  "system.decision_lapse": true
 };
 var ROOM_ONLY = {
   escalate: true,
@@ -14808,7 +14812,8 @@ var ROOM_ONLY = {
   "system.role": true,
   "system.config": true,
   "system.lease_clear": true,
-  "system.revoke": true
+  "system.revoke": true,
+  "system.decision_lapse": true
 };
 var PARTICIPANT_PERFORMATIVES = Object.keys(PERFORMATIVE_SET).filter((p) => !(p in ROOM_ONLY));
 // ../proto/src/machine.ts
@@ -14841,13 +14846,18 @@ function matchesWatch(watch, entry) {
   }
   if (watch.participant !== undefined) {
     if (perf === "system.role") {
-      if (data?.["participant"] !== watch.participant)
+      const matchesIncoming = data?.["participant"] === watch.participant;
+      const matchesOutgoing = data?.["replaces"] !== undefined && data["replaces"] === watch.participant;
+      if (!matchesIncoming && !matchesOutgoing)
         return false;
     } else if (perf === "system.revoke") {
       const role = data?.["role"];
       if (role?.participant !== watch.participant)
         return false;
     } else if (perf === "signal") {
+      if (sub.sender !== watch.participant)
+        return false;
+    } else if (perf === "key.rotate") {
       if (sub.sender !== watch.participant)
         return false;
     } else {
@@ -15592,6 +15602,8 @@ class MeshClient {
       sub.task_ref = input.task_ref;
     if (input.thread !== undefined)
       sub.thread = input.thread;
+    if (input.contingent_on !== undefined)
+      sub.contingent_on = input.contingent_on;
     if (input.reply_to !== undefined)
       sub.reply_to = input.reply_to;
     if (input.mentions !== undefined)
@@ -15822,8 +15834,8 @@ class MeshClient {
   async grant(subject, path2, grade) {
     return this._postSeq("/grants", { path_prefix: path2, subject, access: grade });
   }
-  async assignRole(participant, role) {
-    return this._postSeq("/roles", { participant, role });
+  async assignRole(participant, role, opts) {
+    return this._postSeq("/roles", { participant, role, ...opts });
   }
   async setDefaultAccess(access) {
     return this._postSeq("/config", { default_access: access });
@@ -16478,7 +16490,8 @@ function startIpcServer(opts) {
         reply_to: typeof p["reply_to"] === "number" ? p["reply_to"] : undefined,
         mentions: Array.isArray(p["mentions"]) ? p["mentions"] : undefined,
         artifacts: Array.isArray(p["artifacts"]) ? p["artifacts"] : undefined,
-        data: p["data"]
+        data: p["data"],
+        contingent_on: p["contingent_on"]
       };
       return client.postEntry(input);
     }
@@ -16509,6 +16522,9 @@ function startIpcServer(opts) {
         defaults: state.defaults,
         head: state.head
       };
+    }
+    if (method === "room_roles") {
+      return { roles: await client.listRoles() };
     }
     if (method === "fs_ls") {
       if (!cache)
@@ -29697,6 +29713,13 @@ function createMcpServer(socketPath) {
 ` + `• release  — voluntarily drop a CLAIMED task back to ANNOUNCED.  Use when blocked.
 ` + `• signal   — liveness condition transition (data: {condition:"working"|"stuck"|"gone"});
 ` + `             never transitions a task; normally published by the daemon, not by agents.
+` + `• decide.request — ask a named settler (id:<pid> and/or role:<name> arms) a question;
+` + `               data: {question, authority:["id:.."|"role:.."], deadline?, fallback_note?, refs?}
+` + `• decide.resolve  — settle an open decision you are currently authorized for;
+` + `               data: {resolution}. Wrong settler → 403 not_authorized_settler.
+` + `• key.rotate — pre-rotation key event (data: {reveal_pubkey?, next_commitment?, tombstone?});
+` + "             DO NOT hand-construct this: use the CLI's `mesh key rotate`/`mesh key retire`\n" + `             commands. Under runtime custody the agent never holds next_secret, so any
+` + `             hand-crafted attempt fails safely with bad_commitment — routable, harmless.
 
 ` + `• file.write  — upsert a file in the room's metadata tree.
 ` + `               data: {path: "src/foo.ts", content_hash: "r2:<64-hex-sha256>", size: <bytes>}
@@ -29727,6 +29750,9 @@ function createMcpServer(socketPath) {
         "accept",
         "reject",
         "signal",
+        "decide.request",
+        "decide.resolve",
+        "key.rotate",
         "file.write",
         "file.delete",
         "file.lock",
@@ -29739,9 +29765,12 @@ function createMcpServer(socketPath) {
       reply_to: exports_external.number().int().optional().describe("Seq of the entry being replied to"),
       mentions: exports_external.array(exports_external.string()).optional().describe('Participant IDs to @-mention (e.g. ["agentB@team"])'),
       artifacts: exports_external.array(exports_external.string()).optional().describe('Artifact refs — REQUIRED for deliver (e.g. ["pr://org/repo/42", "git:repo@sha"])'),
+      contingent_on: exports_external.string().optional().describe("Id of a decision this message guesses on ahead of its resolution (Intent H); opaque, unvalidated"),
       data: exports_external.record(exports_external.unknown()).optional().describe(`Performative-specific payload.
 ` + `announce: {mode:"volunteer", lease_ttl_s?, verdict_by?}
 ` + `signal: {condition:"working"|"stuck"|"gone"}
+` + `decide.request: {question, authority:["id:pid"|"role:name"], deadline?, fallback_note?, refs?}
+` + `decide.resolve: {resolution}
 ` + `file.write: {path: "src/foo.ts", content_hash: "r2:<64-hex-sha256>", size: <bytes>}
 ` + `file.delete: {path: "src/foo.ts"}
 ` + `file.lock:   {path: "src/foo.ts"} — acquires exclusive lease
@@ -29869,6 +29898,25 @@ function createMcpServer(socketPath) {
   }, async (_args) => {
     try {
       return ok(await callIpc(socketPath, "room_roster", {}));
+    } catch (err2) {
+      if (isDaemonDown(err2))
+        return daemonDown();
+      throw err2;
+    }
+  });
+  server.registerTool("room_roles", {
+    description: `Get the room's role-binding registry: who holds which named role, with bench depth,
+` + `time-box window, override status, and each holder's last published condition.
+
+` + `Use this to:
+` + `• Find who currently holds a named role (e.g. reviewer:backend) before addressing it
+` + `• See the bench order (starter vs backup) for a role — nobody is auto-promoted
+` + `• Check whether a time-boxed binding (e.g. an on-call window) is still active
+` + "• Distinguish a role's active override from its default holder",
+    inputSchema: {}
+  }, async (_args) => {
+    try {
+      return ok(await callIpc(socketPath, "room_roles", {}));
     } catch (err2) {
       if (isDaemonDown(err2))
         return daemonDown();

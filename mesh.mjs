@@ -1389,6 +1389,10 @@ function saveConfig(cfg, home) {
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify(cfg, null, 2));
 }
+var DEFAULT_ROOM_URL = "https://mesh-room.opensocialforall.workers.dev";
+function resolveRoomUrl(explicit, home) {
+  return explicit ?? process.env["ROOM_URL"] ?? loadConfig(home).defaultRoomUrl ?? DEFAULT_ROOM_URL;
+}
 function setActiveProfile(name) {
   const root = PROFILES_ROOT();
   fs.mkdirSync(root, { recursive: true });
@@ -9359,7 +9363,7 @@ async function cmdCreateRoom(args2) {
       die5("create-room: --owner <id> is required");
     }
   }
-  const workerUrl = flag5(args2, "url") ?? loadConfig(home).defaultRoomUrl ?? "http://localhost:8787";
+  const workerUrl = resolveRoomUrl(flag5(args2, "url"), home);
   const identity = loadIdentityWithSecret(home);
   if (!identity)
     die5(`No identity found. Run "mesh keygen --id ${ownerId}" first.`);
@@ -9398,7 +9402,7 @@ async function cmdInit(args2) {
   const id2 = await promptLine("Identity id");
   if (!id2)
     die5("init: identity id cannot be empty");
-  const existingUrl = loadConfig(profileHome).defaultRoomUrl ?? "http://localhost:8787";
+  const existingUrl = resolveRoomUrl(undefined, profileHome);
   const url = await promptLine("Room server URL", existingUrl);
   saveConfig({ defaultRoomUrl: url }, profileHome);
   const action = await promptChoice("Create a new room or join an existing one?", ["create", "join"]);
@@ -10691,7 +10695,7 @@ identity:
   key retire                                                 Retire this identity: no further entries may be authored
 
 room:
-  room create <room> --owner <id> [--url <base>]            Create a room and join as owner
+  room create <room> --owner <id> [--url <base>]            Create a room and join as owner (--url: $ROOM_URL or hosted default)
   room join <room-url> <room>.<secret>                      Join an existing room
   room join <room-url> <room> --passphrase <phrase>         Join with a single-use passphrase invite
   room invite [--show | --rotate]                           Show or rotate the invite secret (owner only)
@@ -10764,6 +10768,7 @@ Global options:
   --room <room_id>    Target room (if you have multiple rooms)
   --home <dir>        Override MESH_HOME (default: ~/.mesh)
   --profile <name>    Use a named profile (overridden by MESH_HOME / --home)
+  ROOM_URL (env)      Room base URL when --url is omitted (else the hosted default)
   --help, -h          Show this usage (anywhere in the command line)
   --version, -V       Print the CLI version (also: mesh version)
 `);

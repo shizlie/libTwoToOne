@@ -2944,9 +2944,9 @@ async function fsPutOcc(client, repopath, bytes) {
 }
 
 // src/main.ts
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync4, mkdirSync as mkdirSync5, statSync } from "node:fs";
+import { readFileSync as readFileSync5, writeFileSync as writeFileSync4, mkdirSync as mkdirSync5, statSync, readdirSync as readdirSync2 } from "node:fs";
 import * as os2 from "node:os";
-import { resolve as resolve2, join as join4, dirname as dirname5, sep as sep2 } from "node:path";
+import { resolve as resolve2, join as join5, dirname as dirname5, sep as sep2 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/deps.ts
@@ -8738,6 +8738,56 @@ async function fsCmdConfig(client, args2, _senderId) {
   ok2(`fs config: default_access → ${access} (seq=${r.seq})`);
 }
 
+// src/ignore.ts
+import { readFileSync as readFileSync4 } from "node:fs";
+import { join as join4 } from "node:path";
+function loadMeshignore(root) {
+  try {
+    return readFileSync4(join4(root, ".meshignore"), "utf8").split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith("#"));
+  } catch {
+    return [];
+  }
+}
+function globToRegexBody(glob) {
+  let out = "";
+  for (let i = 0;i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*") {
+      if (glob[i + 1] === "*") {
+        out += ".*";
+        i++;
+      } else
+        out += "[^/]*";
+    } else if (c === "?") {
+      out += "[^/]";
+    } else if (".+^${}()|[]\\".includes(c)) {
+      out += "\\" + c;
+    } else {
+      out += c;
+    }
+  }
+  return out;
+}
+function patternToRegex(pattern) {
+  let p = pattern.endsWith("/") ? pattern.slice(0, -1) : pattern;
+  const anchored = p.startsWith("/");
+  if (anchored)
+    p = p.replace(/^\/+/, "");
+  const head = anchored ? "^" : "(?:^|/)";
+  return new RegExp(`${head}${globToRegexBody(p)}(?:/|$)`);
+}
+function makeIgnore(patterns, opts = {}) {
+  const res = patterns.map(patternToRegex);
+  return (rel) => {
+    const segs = rel.split("/");
+    if (segs.includes(".meshignore"))
+      return true;
+    if (!opts.includeHidden && segs.some((s) => s.startsWith(".")))
+      return true;
+    return res.some((re) => re.test(rel));
+  };
+}
+
 // src/wait-report.ts
 function percentile(sortedAsc, p) {
   if (sortedAsc.length === 0)
@@ -9155,7 +9205,7 @@ function getVersion() {
     return "1.14.0";
   try {
     const here = dirname5(fileURLToPath(import.meta.url));
-    return readFileSync4(resolve2(here, "../../../VERSION"), "utf8").trim();
+    return readFileSync5(resolve2(here, "../../../VERSION"), "utf8").trim();
   } catch {
     return "unknown";
   }
@@ -10123,7 +10173,7 @@ async function cmdFetch(args2) {
   if (!(bytes instanceof Uint8Array))
     die5(`fetch: [${bytes.error}] ${bytes.detail}${bytes.hint ? " — " + bytes.hint : ""}`);
   const name = arg.startsWith("r2:") ? ref.hash : arg;
-  const dest = resolve2(flag5(args2, "into") ?? join4(home ?? meshHome(), "artifacts", name));
+  const dest = resolve2(flag5(args2, "into") ?? join5(home ?? meshHome(), "artifacts", name));
   await unpackInto(bytes, dest);
   ok5(`Extracted to ${dest}`);
 }
@@ -10169,13 +10219,60 @@ async function followFilePlane(client, since, onLine) {
     }
   }
 }
+function walkDirFiles(root, isIgnored) {
+  const out = [];
+  const rec = (dir, rel) => {
+    for (const ent of readdirSync2(dir, { withFileTypes: true })) {
+      const childRel = rel ? `${rel}/${ent.name}` : ent.name;
+      if (isIgnored(childRel))
+        continue;
+      if (ent.isDirectory())
+        rec(join5(dir, ent.name), childRel);
+      else if (ent.isFile())
+        out.push(childRel);
+    }
+  };
+  rec(root, "");
+  return out.sort();
+}
 var FS_CMDS = {
   put: async (client, args2) => {
     const localPath = args2.positional[0];
     if (!localPath)
       die5("fs put: <path> is required");
+    let isDir = false, exists = true;
+    try {
+      isDir = statSync(localPath).isDirectory();
+    } catch {
+      exists = false;
+    }
+    if (!exists)
+      die5(`fs put: no such file or directory: ${localPath}`);
+    if (isDir) {
+      const prefix = (flag5(args2, "as") ?? localPath).replace(/\\/g, "/").split("/").filter((s) => s.length > 0 && s !== ".").join("/");
+      const isIgnored = makeIgnore(loadMeshignore(localPath), { includeHidden: flagBool2(args2, "all") });
+      const rels = walkDirFiles(localPath, isIgnored);
+      if (rels.length === 0)
+        die5(`fs put: ${localPath} has no eligible files (hidden entries skipped unless --all; .meshignore patterns applied)`);
+      let deduped = 0;
+      for (const rel of rels) {
+        const repoPath = [prefix, rel].filter((s) => s.length > 0).join("/");
+        const bytes2 = new Uint8Array(readFileSync5(join5(localPath, rel)));
+        const r = await fsPutOcc(client, repoPath, bytes2);
+        if (!r.ok) {
+          if (r.kind === "conflict")
+            die5(`fs put: merge conflict in ${repoPath} — resolve it with a single-file 'fs put' (fs get it first)`);
+          die5(`fs put: ${repoPath}: [${r.error}]${r.detail ? " " + r.detail : ""}${r.hint ? " — " + r.hint : ""}`);
+        }
+        if (r.deduped)
+          deduped++;
+        ok5(`  ${repoPath} (${bytes2.length}b${r.deduped ? ", deduped" : ""})`);
+      }
+      ok5(`fs put: ${rels.length} file(s) from ${localPath}/ → ${prefix || "(room root)"}${deduped ? ` — ${deduped} deduped` : ""}`);
+      return;
+    }
     const as = flag5(args2, "as") ?? localPath;
-    const bytes = new Uint8Array(readFileSync4(localPath));
+    const bytes = new Uint8Array(readFileSync5(localPath));
     const result = await fsPutOcc(client, as, bytes);
     if (!result.ok) {
       if (result.kind === "conflict") {
@@ -10281,8 +10378,18 @@ var FS_CMDS = {
     if ("error" in t)
       die5(`fs get: [${t.error}] ${t.detail}`);
     const node = resolveNode(t.tree, repopath);
-    if (!node)
+    if (!node) {
+      const norm = normalizeId(repopath);
+      if (t.tree.some((n) => n.path.startsWith(norm + "/"))) {
+        const paths = await hydrateSubtree(client, norm, into);
+        ok5(`fs get: hydrated ${paths.length} file(s) under ${norm} → ${resolve2(into)}`);
+        return;
+      }
       die5(`fs get: not in tree: ${repopath}`);
+    }
+    if (!node.content_hash) {
+      die5(`fs get: '${repopath}' is discoverable but its content is gated — you lack a read grant on this path`);
+    }
     let hash;
     try {
       hash = hashFromRef(node.content_hash);
@@ -10304,6 +10411,23 @@ var FS_CMDS = {
     const repopath = args2.positional[0];
     if (!repopath)
       die5("fs rm: <repopath> is required");
+    if (flagBool2(args2, "r") || flagBool2(args2, "recursive")) {
+      const t = await client.getTree(repopath);
+      if ("error" in t)
+        die5(`fs rm: [${t.error}] ${t.detail}`);
+      const norm = normalizeId(repopath);
+      const targets = t.tree.filter((n) => n.path === norm || n.path.startsWith(norm + "/"));
+      if (targets.length === 0)
+        die5(`fs rm: nothing under: ${repopath}`);
+      for (const n of targets) {
+        const r2 = await client.postEntry({ performative: "file.delete", data: { path: n.path } });
+        if (!r2.ok)
+          die5(`fs rm: ${n.path}: [${r2.error}] ${r2.detail}${r2.hint ? " — " + r2.hint : ""}`);
+        ok5(`  rm ${n.path}`);
+      }
+      ok5(`fs rm: ${targets.length} file(s) under ${norm}`);
+      return;
+    }
     const r = await client.postEntry({ performative: "file.delete", data: { path: repopath } });
     if (!r.ok)
       die5(`fs rm: [${r.error}] ${r.detail}${r.hint ? " — " + r.hint : ""}`);
@@ -10729,10 +10853,10 @@ tasks:
             [--mention-me] [--path <p>] [--participant <id>]
 
 files:
-  fs put <path> [--as <repopath>]                           Upload file to the shared workspace (OCC merge-on-write)
+  fs put <path|dir> [--as <repopath>] [--all]               Upload a file, or a directory (recursive); .meshignore excludes, --all includes hidden files
   fs ls [<prefix>] [-f] [--into <dir>]                      List the shared workspace tree (-f: live view — tree, leases, hydration)
-  fs get <repopath> [--into <dir>]                          Hydrate a file from the workspace (default: .mesh/fs)
-  fs rm <repopath>                                          Delete a file from the workspace
+  fs get <repopath|prefix> [--into <dir>]                   Hydrate a file — or a whole subtree if given a directory prefix (default: .mesh/fs)
+  fs rm <repopath> [-r]                                     Delete a file (or a whole subtree with -r)
   fs edit <path> [--into <dir>]                             Subscribe + edit a live Yjs doc (Ctrl+C to exit)
   fs lock <path>                                            Acquire exclusive lease (file.lock)
   fs unlock <path>                                          Release exclusive lease (file.unlock)

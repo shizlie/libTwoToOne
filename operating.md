@@ -129,17 +129,25 @@ records `{path, content_hash, size, tip_seq}` only — bytes are fetched per-fil
 
 ### `mesh fs` verbs
 
+**Identity contract:** a file's identity is `normalizeId(path relative to the workspace
+root)` — identical in the owner's folder, the room tree, and every agent's folder; byte
+freshness (in sync / ahead / behind / diverged) is orthogonal and tracked per-machine (see
+`mesh fs status`). Every fs verb below resolves local bytes against ONE workspace root,
+default the current directory (files land in place — no `.mesh/fs` shadow copy). `--root
+<dir>` overrides the root; `--into <dir>` remains as an explicit alias for one-off scratch
+staging (`--into` wins if both are given).
+
 | command | action |
 |---------|--------|
 | `mesh fs put <path> [--as <repopath>]` | Upload a file to R2 and post a `file.write` entry (OCC merge-on-write) |
-| `mesh fs ls [<prefix>] [-f] [--into <dir>]` | List the shared file tree; `-f` = live view (clears + redraws on file-plane events, 5s TTL tick): tree · policy · leases (holder + remaining TTL) · editing · `local` column showing which bytes are hydrated under `--into` (default `.mesh/fs/`) |
-| `mesh fs get <repopath> [--into <dir>]` | Hydrate a file from R2 (default: `.mesh/fs/`) |
+| `mesh fs ls [<prefix>] [-f] [--into <dir>\|--root <dir>]` | List the shared file tree; `-f` = live view (clears + redraws on file-plane events, 5s TTL tick): tree · policy · leases (holder + remaining TTL) · editing · `local` column showing which bytes are hydrated under the workspace root (default: cwd) |
+| `mesh fs get <repopath> [--into <dir>\|--root <dir>]` | Hydrate a file from R2 into the workspace root (default: cwd) |
 | `mesh fs rm <repopath>` | Post a `file.delete` entry (removes the path from the tree) |
-| `mesh fs edit <path> [--into <dir>]` | Subscribe + hydrate Yjs CRDT doc; relay updates; dirty-check against a local sidecar and 3-way-merge on re-invoke; publish snapshot on exit |
+| `mesh fs edit <path> [--into <dir>\|--root <dir>]` | Subscribe + hydrate Yjs CRDT doc; relay updates; dirty-check against a local sidecar and 3-way-merge on re-invoke; publish snapshot on exit |
 | `mesh fs lock <path>` | Acquire an exclusive lease on a path (`file.lock` performative); auto-subscribes a watch on the path (also on `423 path_locked` rejection) |
 | `mesh fs unlock <path>` | Release an exclusive lease (`file.unlock` performative); deletes the matching auto-watch |
 | `mesh fs grep <query> [--prefix p] [--limit n] [--hydrate]` | FTS content search via `/search`; `--hydrate` also fetches matched winners |
-| `mesh fs hydrate [<prefix>] [--into <dir>]` | Bulk-download a subtree to disk (default: `.mesh/fs/`) |
+| `mesh fs hydrate [<prefix>] [--into <dir>\|--root <dir>]` | Bulk-download a subtree to disk, into the workspace root (default: cwd) |
 | `mesh fs log [-f]` | Show workspace changes (`file.*`, `system.grant`/`role`/`revoke`/`lease_clear`/`config`) |
 | `mesh fs grant <subject> <path> <grade>` | Issue a path grant (owner only; grade: `discover\|read\|write\|exclusive`) |
 | `mesh fs grants` | List all path grants in the room |
@@ -214,7 +222,7 @@ lookup; then the default `shared`.
 1. **Subscribe first** — opens a WebSocket (`/stream`) and buffers incoming `crdt` frames for
    the target path before hydrating the snapshot, so no update is lost.
 2. **Hydrate** — fetches the latest R2 blob for the path (Yjs snapshot or plain-text fallback),
-   applies any buffered frames, writes the result to `<into>/<path>` (default `.mesh/fs/`).
+   applies any buffered frames, writes the result to `<into>/<path>` (default: the workspace root, i.e. cwd).
 3. **Relay** — broadcasts the current doc state via `POST /relay` so late-joining peers
    reconverge immediately.
 4. **Publish** — writes a `file.write` snapshot to R2 every 30 s and on `SIGINT`/`SIGTERM`,
@@ -336,7 +344,7 @@ mesh fs grep "TODO" [--prefix src/] [--limit 20] [--hydrate]
 ```
 
 `mesh fs grep` is the client-facing interface to `/search`. It prints `path: snippet` per
-match. `--hydrate` materialises each matched winner locally (into `.mesh/fs/` by default);
+match. `--hydrate` materialises each matched winner locally (into the workspace root by default);
 the rest of the repo is **never fetched**. This satisfies S-E3: the search response plus the
 hydrated winners is typically > 100× smaller than the full repository.
 
@@ -436,7 +444,7 @@ mesh fs hydrate [<prefix>] [--into <dir>]
 ```
 
 Fetches the metadata tree for `<prefix>`, downloads each file's R2 blob, and writes it under
-`<into>` (default `.mesh/fs/`). A path-containment guard skips any node whose resolved
+`<into>` (default: the workspace root, i.e. cwd). A path-containment guard skips any node whose resolved
 destination would escape `<into>` (warns to stderr). Run this before a build, then build on
 the real directory — the build sees hydrated files at real paths.
 
@@ -460,8 +468,8 @@ cold workspace) needs FUSE-level interception or a per-language import resolver 
 files on-demand. Neither is in v1.
 
 **v1 workflow for builds:**
-1. `mesh fs hydrate src/ --into .mesh/fs/` — pre-populate the source subtree.
-2. Run the build on `.mesh/fs/` (or copy to the real directory) — the compiler sees real files.
+1. `mesh fs hydrate src/` — pre-populate the source subtree into the workspace root (default: cwd; `--root <dir>` for a scratch checkout).
+2. Run the build in place — the compiler sees real files.
 
 Full build transparency (hydrate-on-read for arbitrary compiler I/O) is the FUSE-adapter work
 planned for v2. v1 is honest about this: the shim router returns `passthrough` for any path the

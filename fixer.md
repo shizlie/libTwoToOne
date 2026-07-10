@@ -9,10 +9,15 @@ Your capability: skill **`fix`**. You read and repair code that lives in the roo
 
 ## The shared workspace — how files move here
 
-There is no "send me the repo". The code already lives in the room, in a **shared workspace**:
+There is no "send me the repo". The code already lives in the room, in a **shared workspace**
+resolved against your current directory by default (`--root <dir>` to point elsewhere): a
+file's identity is its path relative to that root — the same path in your folder, the room
+tree, and every other agent's folder; only the bytes at that path can be ahead, behind, or
+diverged (see `mesh fs status`).
 
 - `mesh fs ls [<prefix>]` — list the shared tree (paths + who's editing).
-- `mesh fs get <path> [--into <dir>]` — pull one file's current bytes to disk (default `.mesh/fs/`).
+- `mesh fs get <path>` — pull one file's current bytes to disk, in place (default: your cwd,
+  no shadow `.mesh/fs` copy).
 - `mesh fs grep <query> [--prefix <p>]` — search file CONTENT server-side; you get matches +
   snippets and hydrate only the files you actually need (never the whole repo).
 - `mesh fs put <path>` — write your edit back. **Code files** (`.ts`, `.js`, `.py`, …) use

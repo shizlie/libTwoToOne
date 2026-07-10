@@ -4,6 +4,48 @@ All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
+## [1.15.0] — 2026-07-10
+
+### Changed
+
+- **BREAKING — file-plane workspace root defaults to `cwd`; the `.mesh/fs` shadow
+  dir is gone.** Every `fs` verb (`get`/`hydrate`/`ls`/`grep --hydrate`/`edit`) now
+  resolves local bytes against **one workspace root, default the current directory**,
+  and hydrates files **in place** (Dropbox semantics). Previously these defaulted to a
+  `.mesh/fs` shadow cache dir. `--root <dir>` (and its alias `--into <dir>`, which wins
+  when both are given) select an explicit scratch checkout. Migration: scripts that
+  relied on the implicit `.mesh/fs` target must pass `--root .mesh/fs` explicitly, or
+  adopt in-place hydration. Rationale: the shadow dir was a fossil of the pre-safe-get
+  cache-dir design (CONTEXT §12.7 correction, 2026-07-10).
+
+### Added
+
+**No lost work — the sync contract (Intent J)**
+
+- `classifySync(local, base, tip)` — the pure state primitive over the 14-cell
+  existence×equality partition (`@mesh/cli` `sync.ts`), driving both read and write
+  engines from one tree fetch per batch.
+- `mesh fs status` / `mesh fs diff` — porcelain-capable working-set view
+  (`STATE\tpath`) and per-file unified diff against the room tip, with a memory guard
+  on large blobs. New `gated` state for discover-only (content-hash-omitted) nodes.
+- Safe `fs get`/`hydrate` **get engine** (`runGetBatch`): plan → apply → record, never
+  writes the room (`GetClient` deliberately lacks `putArtifact`/`postEntry` — a
+  compile-time proof). Per-row containment guard; one poisoned row never stalls the
+  batch (R-J1). Behind-on-`get` converges local; `put` never writes local files.
+- `fs put` **put engine**: conflict lanes (code = local `diff3` markers + exit 1, room
+  untouched; prose = room fork `name (1).md` with verify-and-bump; binary = fork),
+  client-side prose OCC, one batched `inform` per run (not per file — protects the
+  12/min bucket), and exit-code contract (0 clean / 1 conflicts / 2 hard error).
+  Unchanged files send nothing (no artifact HEAD, no `file.write`, no token).
+- Sidecar edit-base cap (1 MB; binary → hash-only) and normalized (`normalizeId`)
+  sidecar keys everywhere, so a mixed-case `--as` no longer splits the sync base.
+- `mesh deliver --dir` honors `.meshignore`.
+- `mesh brief` / `room_brief`: file-plane workspace section (Intent J Phase C).
+- Committed chronological 3-agent E2E (`examples/verify-sync.ts`,
+  `MESH_E2E_URL`-gated): 9 story beats, 113 checks over put-in-place, behind/push,
+  code conflict, prose fork, resolve + late-joiner, `rm -r --prune`, lock-skip, and
+  final porcelain consistency.
+
 ## [1.14.0] — 2026-07-06
 
 ### Added

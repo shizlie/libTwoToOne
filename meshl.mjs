@@ -14813,6 +14813,10 @@ function normalizeId(path) {
 }
 
 // ../proto/src/access.ts
+var GRADE_ORDER = { discover: 1, read: 2, write: 3, exclusive: 4 };
+function gte(a, b) {
+  return GRADE_ORDER[a] >= GRADE_ORDER[b];
+}
 function prefixBase(prefix) {
   return prefix.replace(/\/\*\*$/, "").replace(/\/\*$/, "");
 }
@@ -16205,6 +16209,8 @@ function resolveNode(tree, repopath) {
   return tree.find((n) => n.path === id);
 }
 function hashFromRef(content_hash) {
+  if (content_hash === undefined)
+    throw new Error("no content ref (row is gated or absent)");
   const m = /^r2:([0-9a-f]{64})$/.exec(content_hash);
   if (!m)
     throw new Error(`not an r2 content ref: ${content_hash}`);
@@ -16239,6 +16245,9 @@ class WorkspaceCache {
       throw new Error(`WorkspaceCache.read: path "${path2}" not found in room tree`);
     }
     const treeHash = node.content_hash;
+    if (treeHash === undefined) {
+      throw new Error(`WorkspaceCache.read: path "${path2}" is content-gated (no read grant) — cannot hydrate`);
+    }
     const existing = this._entries.get(path2);
     if (isCacheFresh(existing?.hash, treeHash)) {
       existing.atime = Date.now();
@@ -16656,10 +16665,38 @@ async function authorOf(client, seq) {
     return null;
   }
 }
-function buildBriefInput(state, selfId, roles, roomId, room, roleCharters) {
+async function resolveMyWriteGrants(client, selfId, roles) {
+  try {
+    const rows = await client.listGrants();
+    if (!Array.isArray(rows))
+      return null;
+    const subjects = new Set([selfId, ...roles.map((r) => `role:${r}`)]);
+    return rows.filter((g) => subjects.has(g.subject) && gte(g.access, "write")).map((g) => ({ path_prefix: g.path_prefix, access: g.access }));
+  } catch {
+    return null;
+  }
+}
+async function resolveActiveLeases(client) {
+  try {
+    const rows = await client.listLeases();
+    if (!Array.isArray(rows))
+      return null;
+    return rows.map((r) => ({ path: r.path, holder: r.holder, lease_expires: r.lease_expires }));
+  } catch {
+    return null;
+  }
+}
+async function resolveWorkspaceSection(client, selfId, roles, posture) {
+  const [writeGrants, leases] = await Promise.all([
+    resolveMyWriteGrants(client, selfId, roles),
+    resolveActiveLeases(client)
+  ]);
+  return { posture, writeGrants, leases };
+}
+function buildBriefInput(state, selfId, roles, roomId, room, roleCharters, workspace) {
   const duties = computeDuties(state.claims, selfId, roles);
   const openDecisions = state.decisions.filter((d) => d.status === "open" && (d.authority.includes(`id:${selfId}`) || roles.some((r) => d.authority.includes(`role:${r}`)))).map((d) => ({ id: d.id, question: d.question }));
-  return { selfId, roomId, roles: [...roles], room, roleCharters, duties, openDecisions };
+  return { selfId, roomId, roles: [...roles], room, roleCharters, duties, openDecisions, workspace };
 }
 
 // src/ipc.ts
@@ -16812,7 +16849,8 @@ function startIpcServer(opts) {
       };
       const room = await readSection(CHARTER_ROOM_PATH);
       const roleCharters = await Promise.all(roles.map((role) => readSection(charterRolePath(role))));
-      return buildBriefInput(state, selfId ?? "", roles, roomId ?? "", room, roleCharters);
+      const workspace = await resolveWorkspaceSection(client, selfId ?? "", roles, state.defaults.default_access ?? "open");
+      return buildBriefInput(state, selfId ?? "", roles, roomId ?? "", room, roleCharters, workspace);
     }
     if (method === "fs_ls") {
       if (!cache)

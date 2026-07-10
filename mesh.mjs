@@ -1175,6 +1175,23 @@ var WINDOWS_RESERVED = {
 function normalizeId(path) {
   return path.normalize("NFC").replace(/\\/g, "/").split("/").filter((s) => s.length > 0).map((s) => s.toLowerCase()).join("/");
 }
+function isLegalPath(path) {
+  if (/[\x00-\x1f\x7f]/.test(path))
+    return { ok: false, reason: "control-char" };
+  const segments = path.replace(/\\/g, "/").split("/").filter((s) => s.length > 0);
+  if (segments.length === 0)
+    return { ok: false, reason: "empty path" };
+  for (const seg of segments) {
+    if (seg === "." || seg === "..")
+      return { ok: false, reason: `path-traversal: ${seg}` };
+    const stem = seg.includes(".") ? seg.slice(0, seg.indexOf(".")) : seg;
+    if (WINDOWS_RESERVED[stem.toLowerCase()])
+      return { ok: false, reason: `windows-reserved: ${seg}` };
+    if (/[<>:"|?*]/.test(seg))
+      return { ok: false, reason: `windows-illegal-char: ${seg}` };
+  }
+  return { ok: true };
+}
 
 // ../proto/src/access.ts
 var GRADE_ORDER = { discover: 1, read: 2, write: 3, exclusive: 4 };
@@ -2322,6 +2339,38 @@ function sectionHeader(path2, tip_seq, author) {
   ].filter((x) => x !== null);
   return parts.length > 0 ? `  # ${safePath} — ${parts.join(" ")}` : `  # ${safePath}`;
 }
+function workspaceGrantLines(section) {
+  if (section.writeGrants === null)
+    return ["  my write access: (unavailable — could not fetch grants)"];
+  if (section.writeGrants.length === 0) {
+    return [section.posture === "open" ? "  my write access: (no explicit grants — posture is open, all members may write)" : "  my write access: (none — posture is closed; ask the owner for a grant)"];
+  }
+  return [
+    "  my write access:",
+    ...section.writeGrants.map((g) => `    ${scrubControl(g.path_prefix)} (${g.access})`)
+  ];
+}
+function workspaceLeaseLines(leases) {
+  if (leases === null)
+    return ["  active leases: (unavailable — could not fetch leases)"];
+  if (leases.length === 0)
+    return ["  active leases: (none)"];
+  return [
+    "  active leases:",
+    ...leases.map((l) => `    ${scrubControl(l.path)} — held by ${scrubControl(l.holder)} (expires ${new Date(l.lease_expires).toISOString()})`)
+  ];
+}
+var FILE_PLANE_USAGE_NOTE = [
+  "file plane — how to touch files:",
+  '  put <path>    upload; code auto-merges, conflicts -> local markers (exit 1); prose forks "name (N)"',
+  "  get <path>    download; safe — never clobbers local edits the room hasn't seen",
+  "  status        per-file sync state vs the room (read-only; --porcelain for scripts)",
+  "  diff <path>   unified diff of your local copy vs the room tip (no local writes)",
+  "  edit <path>   live collaborative co-edit (CRDT prose) — no conflicts, no forks",
+  "  lock/rm       lock <path> reserves exclusive write; rm deletes",
+  `  conflict rule: code keeps the room's copy + writes local markers; prose/binary fork "name (N)"`,
+  "  exit codes: 0 clean  1 conflicts/forks present  2 hard error"
+];
 function renderBrief(b) {
   const lines = [];
   lines.push(`who i am: ${scrubControl(b.selfId)} in ${scrubControl(b.roomId)}` + (b.roles.length > 0 ? ` (roles: ${b.roles.map(scrubControl).join(", ")})` : " (no bound roles)"));
@@ -2355,6 +2404,13 @@ function renderBrief(b) {
     situationLines.push(`  open decisions awaiting your input: ${b.openDecisions.map((d) => `${d.id} (${scrubControl(d.question)})`).join(", ")}`);
   }
   lines.push(...situationLines.length ? situationLines : ["  (nothing open for you right now)"]);
+  lines.push("");
+  lines.push("workspace:");
+  lines.push(`  posture: ${b.workspace.posture}`);
+  lines.push(...workspaceGrantLines(b.workspace));
+  lines.push(...workspaceLeaseLines(b.workspace.leases));
+  lines.push("");
+  lines.push(...FILE_PLANE_USAGE_NOTE);
   return lines.join(`
 `);
 }
@@ -2588,7 +2644,7 @@ import { mkdirSync as mkdirSync2 } from "node:fs";
 function sha256hex(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
-var DEFAULT_EXCLUDES = [".git", "node_modules"];
+var DEFAULT_EXCLUDES = [".git"];
 async function packDir(dir, opts = {}) {
   const excludes = (opts.exclude ?? DEFAULT_EXCLUDES).flatMap((e) => ["--exclude", e]);
   const args = ["-czf", "-", ...excludes, "-C", dir, "."];
@@ -2877,18 +2933,25 @@ function resolveNode(tree, repopath) {
   return tree.find((n) => n.path === id);
 }
 function hashFromRef(content_hash) {
+  if (content_hash === undefined)
+    throw new Error("no content ref (row is gated or absent)");
   const m = /^r2:([0-9a-f]{64})$/.exec(content_hash);
   if (!m)
     throw new Error(`not an r2 content ref: ${content_hash}`);
   return m[1];
 }
-async function fsPutOcc(client, repopath, bytes) {
+function resolveWorkspaceRoot(into, root) {
+  return into ?? root ?? ".";
+}
+async function fsPutOcc(client, repopath, bytes, baseOverrideRef) {
   const hash = sha256hex(bytes);
-  const treeResult = await client.getTree(repopath);
-  let baseHashRef;
-  if ("tree" in treeResult) {
-    const node = resolveNode(treeResult.tree, repopath);
-    baseHashRef = node?.content_hash;
+  let baseHashRef = baseOverrideRef === null ? undefined : baseOverrideRef;
+  if (baseOverrideRef === undefined) {
+    const treeResult = await client.getTree(repopath);
+    if ("tree" in treeResult) {
+      const node = resolveNode(treeResult.tree, repopath);
+      baseHashRef = node?.content_hash;
+    }
   }
   const up = await client.putArtifact(hash, bytes);
   if (!up.ok)
@@ -2902,7 +2965,7 @@ async function fsPutOcc(client, repopath, bytes) {
     postData["base_hash"] = baseHashRef;
   const r = await client.postEntry({ performative: "file.write", data: postData });
   if (r.ok)
-    return { ok: true, seq: r.seq, deduped: up.deduped, hash };
+    return { ok: true, seq: r.seq, deduped: up.deduped, hash, pushedBytes: bytes, merged: false };
   if (r.error === "stale_base" && r.hint && baseHashRef) {
     const tipRef = r.hint;
     if (!tipRef.startsWith("r2:") || !baseHashRef.startsWith("r2:")) {
@@ -2937,16 +3000,16 @@ async function fsPutOcc(client, repopath, bytes) {
       data: { path: repopath, content_hash: "r2:" + mergedHash, size: mergedBytes.length, base_hash: tipRef }
     });
     if (!r2.ok)
-      return { ok: false, kind: "error", error: r2.error, detail: r2.detail, hint: r2.hint };
-    return { ok: true, seq: r2.seq, deduped: up2.deduped, hash: mergedHash };
+      return { ok: false, kind: "error", error: r2.error, detail: r2.detail, hint: r2.hint, retry_after_s: r2.retry_after_s };
+    return { ok: true, seq: r2.seq, deduped: up2.deduped, hash: mergedHash, pushedBytes: mergedBytes, merged: true };
   }
-  return { ok: false, kind: "error", error: r.error, detail: r.detail, hint: r.hint };
+  return { ok: false, kind: "error", error: r.error, detail: r.detail, hint: r.hint, retry_after_s: r.retry_after_s };
 }
 
 // src/main.ts
-import { readFileSync as readFileSync5, writeFileSync as writeFileSync4, mkdirSync as mkdirSync5, statSync, readdirSync as readdirSync2 } from "node:fs";
+import { readFileSync as readFileSync6, statSync, readdirSync as readdirSync3 } from "node:fs";
 import * as os2 from "node:os";
-import { resolve as resolve2, join as join5, dirname as dirname5, sep as sep2 } from "node:path";
+import { resolve as resolve3, join as join5, dirname as dirname6, sep as sep3 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/deps.ts
@@ -8248,6 +8311,7 @@ import { resolve, dirname as dirname4, sep } from "node:path";
 // src/edit-base.ts
 import * as fs2 from "node:fs";
 import * as path2 from "node:path";
+var SIDECAR_CONTENT_CAP_BYTES = 1e6;
 function sidecarPath(roomId, repopath, home) {
   for (const [label, raw] of [["roomId", roomId], ["repopath", repopath]]) {
     let decoded;
@@ -8287,6 +8351,34 @@ function writeSidecar(roomId, repopath, sidecar, home) {
     fs2.chmodSync(dir, 448);
   } catch {}
 }
+function dropSidecar(roomId, repopath, home) {
+  const p = sidecarPath(roomId, repopath, home);
+  try {
+    fs2.rmSync(p);
+  } catch {}
+}
+function buildSidecar(bytes, tipHash) {
+  if (isValidUtf8Bytes(bytes) && bytes.length <= SIDECAR_CONTENT_CAP_BYTES) {
+    return { content: Buffer.from(bytes).toString("utf8"), tip_hash: tipHash };
+  }
+  return { tip_hash: tipHash };
+}
+function listSidecarPaths(roomId, home) {
+  const dir = path2.join(home ?? meshHome(), "edit-base", roomId);
+  let entries;
+  try {
+    entries = fs2.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const name of entries) {
+    try {
+      out.push(decodeURIComponent(name));
+    } catch {}
+  }
+  return out;
+}
 function isValidUtf8Bytes(bytes) {
   try {
     new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -8324,13 +8416,14 @@ function hasPreExistingConflictMarkers(localBytes) {
 }
 function decideEditWrite(input) {
   const { sidecar, tipText, tipHash, localBytes } = input;
+  const sidecarContent = sidecar?.content;
   if (localBytes === undefined) {
     return { kind: "clean", text: tipText, sidecar: { content: tipText, tip_hash: tipHash } };
   }
-  if (sidecar !== undefined && localBytes.equals(Buffer.from(sidecar.content, "utf8"))) {
+  if (sidecarContent !== undefined && localBytes.equals(Buffer.from(sidecarContent, "utf8"))) {
     return { kind: "clean", text: tipText, sidecar: { content: tipText, tip_hash: tipHash } };
   }
-  const base = sidecar?.content ?? tipText;
+  const base = sidecarContent ?? tipText;
   if (!isValidUtf8Bytes(localBytes) || !isValidUtf8Text(base) || !isValidUtf8Text(tipText)) {
     return {
       kind: "binary",
@@ -8345,7 +8438,7 @@ function decideEditWrite(input) {
       text: merge.merged,
       sidecar: { content: merge.merged, tip_hash: tipHash }
     };
-    if (sidecar === undefined) {
+    if (sidecarContent === undefined) {
       result.warning = "fs edit: no prior sidecar found — kept local edits, merged against the room tip";
     }
     return result;
@@ -8423,7 +8516,7 @@ async function fsCmdEdit(client, args2, _senderId) {
   const repopath = args2.positional[0];
   if (!repopath)
     die("fs edit: <path> is required");
-  const into = flag(args2, "into") ?? ".mesh/fs";
+  const into = resolveWorkspaceRoot(flag(args2, "into"), flag(args2, "root"));
   const ac = new AbortController;
   const buffered = [];
   let liveApply = false;
@@ -8787,6 +8880,15 @@ function makeIgnore(patterns, opts = {}) {
     return res.some((re) => re.test(rel));
   };
 }
+function meshignoreToTarExcludes(patterns) {
+  return patterns.map((p) => {
+    if (p.startsWith("/"))
+      return "./" + p.replace(/^\/+/, "");
+    if (p.endsWith("/"))
+      return p.slice(0, -1);
+    return p;
+  });
+}
 
 // src/wait-report.ts
 function percentile(sortedAsc, p) {
@@ -9100,10 +9202,38 @@ async function resolveMyRoles(client, selfId) {
     return [];
   }
 }
-function buildBriefInput(state, selfId, roles, roomId, room, roleCharters) {
+async function resolveMyWriteGrants(client, selfId, roles) {
+  try {
+    const rows = await client.listGrants();
+    if (!Array.isArray(rows))
+      return null;
+    const subjects = new Set([selfId, ...roles.map((r) => `role:${r}`)]);
+    return rows.filter((g) => subjects.has(g.subject) && gte(g.access, "write")).map((g) => ({ path_prefix: g.path_prefix, access: g.access }));
+  } catch {
+    return null;
+  }
+}
+async function resolveActiveLeases(client) {
+  try {
+    const rows = await client.listLeases();
+    if (!Array.isArray(rows))
+      return null;
+    return rows.map((r) => ({ path: r.path, holder: r.holder, lease_expires: r.lease_expires }));
+  } catch {
+    return null;
+  }
+}
+async function resolveWorkspaceSection(client, selfId, roles, posture) {
+  const [writeGrants, leases] = await Promise.all([
+    resolveMyWriteGrants(client, selfId, roles),
+    resolveActiveLeases(client)
+  ]);
+  return { posture, writeGrants, leases };
+}
+function buildBriefInput(state, selfId, roles, roomId, room, roleCharters, workspace) {
   const duties = computeDuties(state.claims, selfId, roles);
   const openDecisions = state.decisions.filter((d) => d.status === "open" && (d.authority.includes(`id:${selfId}`) || roles.some((r) => d.authority.includes(`role:${r}`)))).map((d) => ({ id: d.id, question: d.question }));
-  return { selfId, roomId, roles: [...roles], room, roleCharters, duties, openDecisions };
+  return { selfId, roomId, roles: [...roles], room, roleCharters, duties, openDecisions, workspace };
 }
 async function cmdBrief(args2) {
   const home = flag4(args2, "home");
@@ -9123,12 +9253,894 @@ async function cmdBrief(args2) {
     client.getState(),
     resolveMyRoles(client, identity.id)
   ]);
-  const [roomSection, roleCharters] = await Promise.all([
+  const [roomSection, roleCharters, workspace] = await Promise.all([
     resolveCharterSection(client, CHARTER_ROOM_PATH),
-    Promise.all(roles.map((role) => resolveCharterSection(client, charterRolePath(role))))
+    Promise.all(roles.map((role) => resolveCharterSection(client, charterRolePath(role)))),
+    resolveWorkspaceSection(client, identity.id, roles, state.defaults.default_access ?? "open")
   ]);
-  const input = buildBriefInput(state, identity.id, roles, roomId, roomSection, roleCharters);
+  const input = buildBriefInput(state, identity.id, roles, roomId, roomSection, roleCharters, workspace);
   ok4(renderBrief(input));
+}
+
+// src/sync.ts
+import { writeFileSync as writeFileSync4, existsSync as existsSync3, mkdirSync as mkdirSync5, readFileSync as readFileSync5, unlinkSync } from "node:fs";
+import { resolve as resolve2, dirname as dirname5, sep as sep2 } from "node:path";
+function classifySync(input) {
+  if (input.tipGated)
+    return "gated";
+  const { localHash, baseTipHash, tipHash } = input;
+  const L3 = localHash !== undefined;
+  const B = baseTipHash !== undefined;
+  const T = tipHash !== undefined;
+  if (!L3 && !B && !T)
+    return "vacuous";
+  if (L3 && !B && !T)
+    return "untracked";
+  if (!L3 && !B && T)
+    return "room-only";
+  if (!L3 && B && !T)
+    return "orphan-base";
+  if (!L3 && B && T)
+    return "local-deleted";
+  if (L3 && B && !T)
+    return localHash === baseTipHash ? "room-deleted-clean" : "room-deleted-dirty";
+  if (L3 && !B && T)
+    return localHash === tipHash ? "adopt" : "never-synced";
+  const lb = localHash === baseTipHash;
+  const bt = baseTipHash === tipHash;
+  const lt = localHash === tipHash;
+  if (lb && bt)
+    return "in-sync";
+  if (!lb && bt)
+    return "ahead";
+  if (lb && !bt)
+    return "behind";
+  if (lt)
+    return "converged";
+  return "diverged";
+}
+var STATE_GLYPH = {
+  vacuous: " ",
+  untracked: "?",
+  "room-only": "↓",
+  "orphan-base": ".",
+  "local-deleted": "↓",
+  "room-deleted-clean": "✝",
+  "room-deleted-dirty": "✝",
+  adopt: "=",
+  "never-synced": "⇅",
+  "in-sync": "=",
+  ahead: "↑",
+  behind: "↓",
+  converged: "=",
+  diverged: "⇅",
+  gated: "⊘"
+};
+var OVERLAY_GLYPH = {
+  locked: "\uD83D\uDD12",
+  "conflict-markers": "C"
+};
+function buildStatusRow(input, now) {
+  const state = classifySync({ localHash: input.localHash, baseTipHash: input.baseTipHash, tipHash: input.tipHash, tipGated: input.gated });
+  const details = [];
+  let overlay;
+  if (input.lease && input.lease.expiresAtMs > now) {
+    overlay = "locked";
+    const ttlS = Math.max(0, Math.round((input.lease.expiresAtMs - now) / 1000));
+    details.push(`held by ${input.lease.holder}, ${ttlS}s left`);
+  } else if (input.hasConflictMarkers) {
+    overlay = "conflict-markers";
+  }
+  if (input.gated)
+    details.push("content-gated");
+  return {
+    path: input.path,
+    state,
+    glyph: overlay ? OVERLAY_GLYPH[overlay] : STATE_GLYPH[state],
+    overlay,
+    detail: details.length > 0 ? details.join("; ") : undefined
+  };
+}
+function composeStatusRows(input, now) {
+  const allPaths = new Set([...input.local.keys(), ...input.tip.keys(), ...input.sidecarOnlyPaths]);
+  const rows = [];
+  for (const path3 of [...allPaths].sort()) {
+    const local = input.local.get(path3);
+    const node = input.tip.get(path3);
+    const localText = local?.text;
+    rows.push(buildStatusRow({
+      path: path3,
+      localHash: local?.hash,
+      baseTipHash: input.baseTipHash.get(path3),
+      tipHash: node?.content_hash,
+      gated: node !== undefined && !node.content_hash,
+      lease: input.lease.get(path3),
+      hasConflictMarkers: localText !== undefined && hasConflictMarkers(localText)
+    }, now));
+  }
+  return rows;
+}
+function formatStatusLine(row, opts) {
+  const label = row.overlay ?? row.state;
+  if (opts.porcelain)
+    return `${label}	${row.path}`;
+  return row.detail ? `${row.glyph} ${label}  ${row.path}  (${row.detail})` : `${row.glyph} ${label}  ${row.path}`;
+}
+function dryRunMergeVerdict(result) {
+  return result.ok ? "auto-mergeable" : "WILL conflict";
+}
+var MAX_DIFF_CELLS = 4000000;
+var MAX_DIFF_DIM = 20000;
+function lcsDiff(a, b) {
+  const n = a.length, m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i2 = n - 1;i2 >= 0; i2--) {
+    for (let j2 = m - 1;j2 >= 0; j2--) {
+      dp[i2][j2] = a[i2] === b[j2] ? dp[i2 + 1][j2 + 1] + 1 : Math.max(dp[i2 + 1][j2], dp[i2][j2 + 1]);
+    }
+  }
+  const ops = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      ops.push({ kind: "eq", line: a[i] });
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      ops.push({ kind: "del", line: a[i] });
+      i++;
+    } else {
+      ops.push({ kind: "add", line: b[j] });
+      j++;
+    }
+  }
+  while (i < n) {
+    ops.push({ kind: "del", line: a[i] });
+    i++;
+  }
+  while (j < m) {
+    ops.push({ kind: "add", line: b[j] });
+    j++;
+  }
+  return ops;
+}
+function hunkRanges(ops, context) {
+  const changeIdxs = [];
+  ops.forEach((op, idx) => {
+    if (op.kind !== "eq")
+      changeIdxs.push(idx);
+  });
+  if (changeIdxs.length === 0)
+    return [];
+  const ranges = [];
+  let start = Math.max(0, changeIdxs[0] - context);
+  let end = Math.min(ops.length, changeIdxs[0] + 1 + context);
+  for (let k = 1;k < changeIdxs.length; k++) {
+    const idx = changeIdxs[k];
+    const s = Math.max(0, idx - context);
+    const e = Math.min(ops.length, idx + 1 + context);
+    if (s <= end) {
+      end = Math.max(end, e);
+    } else {
+      ranges.push([start, end]);
+      start = s;
+      end = e;
+    }
+  }
+  ranges.push([start, end]);
+  return ranges;
+}
+function unifiedDiff(aText, bText, aLabel, bLabel) {
+  if (aText === bText)
+    return "(no differences)";
+  const aLines = aText.split(`
+`);
+  const bLines = bText.split(`
+`);
+  if (aLines.length * bLines.length > MAX_DIFF_CELLS || aLines.length > MAX_DIFF_DIM || bLines.length > MAX_DIFF_DIM) {
+    return [
+      `--- ${aLabel}`,
+      `+++ ${bLabel}`,
+      `@@ whole file differs (too large to line-diff: ${aLines.length} vs ${bLines.length} lines) @@`
+    ].join(`
+`);
+  }
+  const ops = lcsDiff(aLines, bLines);
+  const aPos = [];
+  const bPos = [];
+  let ai = 1, bi = 1;
+  for (const op of ops) {
+    aPos.push(ai);
+    bPos.push(bi);
+    if (op.kind !== "add")
+      ai++;
+    if (op.kind !== "del")
+      bi++;
+  }
+  const context = 3;
+  const out = [`--- ${aLabel}`, `+++ ${bLabel}`];
+  for (const [start, end] of hunkRanges(ops, context)) {
+    let aCount = 0, bCount = 0;
+    for (let k = start;k < end; k++) {
+      if (ops[k].kind !== "add")
+        aCount++;
+      if (ops[k].kind !== "del")
+        bCount++;
+    }
+    const aStart = aCount > 0 ? aPos[start] : Math.max(0, aPos[start] - 1);
+    const bStart = bCount > 0 ? bPos[start] : Math.max(0, bPos[start] - 1);
+    out.push(`@@ -${aStart},${aCount} +${bStart},${bCount} @@`);
+    for (let k = start;k < end; k++) {
+      const op = ops[k];
+      const prefix = op.kind === "eq" ? " " : op.kind === "del" ? "-" : "+";
+      out.push(prefix + op.line);
+    }
+  }
+  return out.join(`
+`);
+}
+function contentLane(policy, isBinary) {
+  if (isBinary)
+    return "binary";
+  return policy === "shared" ? "prose" : "code";
+}
+function planPutRow(input) {
+  const state = classifySync(input);
+  switch (state) {
+    case "untracked":
+      return { kind: "add" };
+    case "adopt":
+    case "in-sync":
+    case "converged":
+      return { kind: "noop-refresh" };
+    case "never-synced":
+      return { kind: "refuse" };
+    case "room-deleted-clean":
+      return { kind: "skip-deleted" };
+    case "room-deleted-dirty":
+      return { kind: "resurrect" };
+    case "ahead":
+      return { kind: "fast-forward" };
+    case "behind":
+      return { kind: "skip-behind" };
+    case "diverged":
+      return { kind: "merge-attempt", lane: contentLane(input.policy, input.isBinary) };
+    case "vacuous":
+    case "room-only":
+    case "orphan-base":
+    case "local-deleted":
+      throw new Error(`planPutRow: unreachable state "${state}" — put targets always have local bytes`);
+    case "gated":
+      throw new Error(`planPutRow: unreachable state "gated" — put targets never set tipGated`);
+  }
+}
+function planPutTarget(input) {
+  if (input.hasMarkers)
+    return { kind: "refuse-markers" };
+  if (input.lockedByOther)
+    return { kind: "locked", holder: input.lockedByOther.holder, expiresAtMs: input.lockedByOther.expiresAtMs };
+  return planPutRow(input);
+}
+function nextForkPath(repoPath, taken) {
+  const slash = repoPath.lastIndexOf("/");
+  const dir = slash === -1 ? "" : repoPath.slice(0, slash + 1);
+  const base = slash === -1 ? repoPath : repoPath.slice(slash + 1);
+  const dot = base.lastIndexOf(".");
+  const stem = dot > 0 ? base.slice(0, dot) : base;
+  const ext = dot > 0 ? base.slice(dot) : "";
+  for (let n = 1;; n++) {
+    const candidate = `${dir}${stem} (${n})${ext}`;
+    if (!taken.has(normalizeId(candidate)))
+      return candidate;
+  }
+}
+async function forkWrite(client, origRepoPath, bytes, taken, maxAttempts = 3) {
+  const hash = sha256hex(bytes);
+  const seen = new Set(taken);
+  for (let attempt = 0;attempt < maxAttempts; attempt++) {
+    const candidate = nextForkPath(origRepoPath, seen);
+    const legal = isLegalPath(candidate);
+    if (!legal.ok)
+      return { ok: false, error: "illegal_fork_path", detail: legal.reason };
+    const up = await client.putArtifact(hash, bytes);
+    if (!up.ok)
+      return { ok: false, error: up.error, detail: up.detail };
+    const r = await client.postEntry({ performative: "file.write", data: { path: candidate, content_hash: "r2:" + hash, size: bytes.length } });
+    if (!r.ok)
+      return { ok: false, error: r.error, detail: r.detail };
+    const t = await client.getTree(candidate);
+    if (!("error" in t)) {
+      const node = resolveNode(t.tree, candidate);
+      if (node?.content_hash === "r2:" + hash)
+        return { ok: true, forkPath: candidate, hash };
+    }
+    seen.add(normalizeId(candidate));
+  }
+  return { ok: false, error: "fork_race_exhausted", detail: `could not land a fork of ${origRepoPath} after ${maxAttempts} attempts (verify-and-bump)` };
+}
+function finishCodeConflict(ctx, conflictedText) {
+  writeFileSync4(ctx.localAbs, conflictedText, "utf8");
+  return { kind: "conflict-markers-local", stashHash: sha256hex(ctx.localBytes) };
+}
+async function proseMerge(ctx) {
+  const sidecar = ctx.sidecar;
+  const tipRef = ctx.tipHash;
+  let baseText;
+  if (sidecar.content !== undefined) {
+    baseText = sidecar.content;
+  } else {
+    const baseBlob = await ctx.client.getArtifact(hashFromRef(sidecar.tip_hash));
+    if (!(baseBlob instanceof Uint8Array))
+      return { kind: "error", error: "fetch_base_failed", detail: baseBlob.detail };
+    baseText = Buffer.from(baseBlob).toString("utf8");
+  }
+  const tipBlob = await ctx.client.getArtifact(hashFromRef(tipRef));
+  if (!(tipBlob instanceof Uint8Array))
+    return { kind: "error", error: "fetch_tip_failed", detail: tipBlob.detail };
+  const tipText = Buffer.from(tipBlob).toString("utf8");
+  const mineText = Buffer.from(ctx.localBytes).toString("utf8");
+  const merge = threeWayMerge(baseText, tipText, mineText);
+  if (!merge.ok)
+    return { kind: "overlap" };
+  const mergedBytes = new Uint8Array(Buffer.from(merge.merged, "utf8"));
+  const push = await fsPutOcc(ctx.client, ctx.repoPath, mergedBytes, tipRef);
+  if (!push.ok) {
+    if (push.kind === "conflict")
+      return { kind: "overlap" };
+    return { kind: "error", error: push.error, detail: push.detail };
+  }
+  return { kind: "merged", hash: push.hash, pushedBytes: mergedBytes };
+}
+async function applyMergeAttempt(ctx, lane) {
+  switch (lane) {
+    case "binary": {
+      const fork = await forkWrite(ctx.client, ctx.repoPath, ctx.localBytes, ctx.knownTaken);
+      return fork.ok ? { kind: "forked", forkPath: fork.forkPath, hash: fork.hash, reason: "binary" } : { kind: "error", error: fork.error, detail: fork.detail };
+    }
+    case "prose": {
+      const merge = await proseMerge(ctx);
+      if (merge.kind === "error")
+        return merge;
+      if (merge.kind === "merged")
+        return { kind: "merged", hash: merge.hash, pushedBytes: merge.pushedBytes };
+      const fork = await forkWrite(ctx.client, ctx.repoPath, ctx.localBytes, ctx.knownTaken);
+      return fork.ok ? { kind: "forked", forkPath: fork.forkPath, hash: fork.hash, reason: "prose" } : { kind: "error", error: fork.error, detail: fork.detail };
+    }
+    case "code": {
+      const r = await fsPutOcc(ctx.client, ctx.repoPath, ctx.localBytes, ctx.sidecar.tip_hash);
+      if (r.ok)
+        return { kind: "merged", hash: r.hash, pushedBytes: r.pushedBytes };
+      if (r.kind === "conflict")
+        return finishCodeConflict(ctx, r.conflictedText);
+      return { kind: "error", error: r.error, detail: r.detail, hint: r.hint, retry_after_s: r.retry_after_s };
+    }
+  }
+}
+async function applyPutTarget(ctx, action, tipSeq, now) {
+  switch (action.kind) {
+    case "refuse-markers":
+      return { kind: "refused-markers" };
+    case "locked": {
+      const watch = await ctx.client.postWatch({ kind: "entry", path: ctx.repoPath });
+      const ttlS = Math.max(0, Math.round((action.expiresAtMs - now) / 1000));
+      return { kind: "locked", holder: action.holder, ttlS, watchRegistered: watch.ok };
+    }
+    case "refuse":
+      return { kind: "refused-never-synced" };
+    case "skip-deleted":
+      return { kind: "skipped-deleted" };
+    case "skip-behind":
+      return { kind: "skipped-behind", tipSeq: tipSeq ?? -1 };
+    case "noop-refresh":
+      return { kind: "unchanged" };
+    case "add":
+    case "resurrect": {
+      const r = await fsPutOcc(ctx.client, ctx.repoPath, ctx.localBytes, null);
+      if (!r.ok) {
+        return r.kind === "conflict" ? { kind: "error", error: "unexpected_conflict", detail: "add/resurrect returned a merge conflict — there was no prior base to conflict against" } : { kind: "error", error: r.error, detail: r.detail, hint: r.hint, retry_after_s: r.retry_after_s };
+      }
+      return action.kind === "add" ? { kind: "added", hash: r.hash, deduped: r.deduped } : { kind: "resurrected", hash: r.hash, deduped: r.deduped };
+    }
+    case "fast-forward": {
+      const r = await fsPutOcc(ctx.client, ctx.repoPath, ctx.localBytes, ctx.sidecar.tip_hash);
+      if (!r.ok) {
+        return r.kind === "conflict" ? finishCodeConflict(ctx, r.conflictedText) : { kind: "error", error: r.error, detail: r.detail, hint: r.hint, retry_after_s: r.retry_after_s };
+      }
+      return r.merged ? { kind: "merged", hash: r.hash, pushedBytes: r.pushedBytes } : { kind: "fast-forwarded", hash: r.hash, deduped: r.deduped };
+    }
+    case "merge-attempt":
+      return applyMergeAttempt(ctx, action.lane);
+  }
+}
+var passthroughRetry = (attempt) => attempt();
+var INFORM_WORTHY = { resurrected: true, "conflict-markers-local": true, forked: true };
+function applyWithRetry(ctx, action, tipSeq, now, retry) {
+  const mutating = action.kind === "add" || action.kind === "resurrect" || action.kind === "fast-forward" || action.kind === "merge-attempt";
+  return mutating ? retry(() => applyPutTarget(ctx, action, tipSeq, now), (o) => o.kind === "error" && o.error === "rate_limited", (o) => o.kind === "error" ? o.retry_after_s : undefined) : applyPutTarget(ctx, action, tipSeq, now);
+}
+async function healStaleRace(client, target, planInput, ctx, now, retry, maxAttempts = 3) {
+  let outcome = { kind: "error", error: "stale_base", detail: "race unresolved after reclassify-retry" };
+  let tipSeq;
+  for (let attempt = 0;attempt < maxAttempts; attempt++) {
+    const fresh = await client.getTree(target.repoPath);
+    if (!("tree" in fresh))
+      return { outcome: { kind: "error", error: fresh.error, detail: fresh.detail }, tipSeq: undefined };
+    const node = resolveNode(fresh.tree, target.repoPath);
+    const action = planPutTarget({ ...planInput, tipHash: node?.content_hash });
+    const freshCtx = { ...ctx, tipHash: node?.content_hash };
+    outcome = await applyWithRetry(freshCtx, action, node?.tip_seq, now, retry);
+    tipSeq = node?.tip_seq;
+    if (!(outcome.kind === "error" && outcome.error === "stale_base"))
+      break;
+  }
+  return { outcome, tipSeq };
+}
+async function resolveTipAuthors(client, seqs) {
+  const authors = new Map;
+  if (seqs.size === 0)
+    return authors;
+  const all2 = [...seqs];
+  const minSeq = Math.min(...all2);
+  const maxSeq = Math.max(...all2);
+  try {
+    const { entries } = await client.getEntries({ since: minSeq - 1, limit: maxSeq - minSeq + 1 });
+    for (const seq of all2)
+      authors.set(seq, entries.find((e) => e.seq === seq)?.submission.sender ?? null);
+  } catch {
+    for (const seq of all2)
+      authors.set(seq, null);
+  }
+  return authors;
+}
+async function runPutBatch(client, targets, opts) {
+  const now = opts.now ?? Date.now();
+  const retry = opts.retry ?? passthroughRetry;
+  const [treeResult, leasesResult] = await Promise.all([client.getTree(opts.treePrefix), client.listLeases()]);
+  if ("error" in treeResult)
+    return { rows: [], hardError: { error: treeResult.error, detail: treeResult.detail }, informed: false, exitCode: 2 };
+  if (!Array.isArray(leasesResult))
+    return { rows: [], hardError: { error: leasesResult.error, detail: leasesResult.detail }, informed: false, exitCode: 2 };
+  const tipByPath = new Map;
+  const knownTaken = new Set;
+  for (const n of treeResult.tree) {
+    knownTaken.add(n.path);
+    if (n.content_hash)
+      tipByPath.set(n.path, { contentHash: n.content_hash, tipSeq: n.tip_seq });
+  }
+  const leaseByPath = new Map;
+  for (const l of leasesResult)
+    leaseByPath.set(l.path, { holder: l.holder, expiresAtMs: l.lease_expires });
+  const rows = [];
+  let hardError;
+  for (const target of targets) {
+    const key = normalizeId(target.repoPath);
+    const sidecar = readSidecar(opts.roomId, key, opts.home);
+    const tip = tipByPath.get(key);
+    const lease = leaseByPath.get(key);
+    const lockedByOther = lease && lease.expiresAtMs > now && lease.holder !== opts.selfId ? lease : undefined;
+    const localHash = "r2:" + sha256hex(target.localBytes);
+    const isBinary = !isValidUtf8Bytes(target.localBytes);
+    const planInput = {
+      localHash,
+      baseTipHash: sidecar?.tip_hash,
+      tipHash: tip?.contentHash,
+      policy: policyFor(target.repoPath),
+      isBinary,
+      lockedByOther,
+      hasMarkers: hasPreExistingConflictMarkers(Buffer.from(target.localBytes))
+    };
+    const action = planPutTarget(planInput);
+    const ctx = {
+      client,
+      repoPath: target.repoPath,
+      localAbs: target.localAbs,
+      localBytes: target.localBytes,
+      sidecar,
+      tipHash: tip?.contentHash,
+      knownTaken
+    };
+    let outcome = await applyWithRetry(ctx, action, tip?.tipSeq, now, retry);
+    let tipSeq = tip?.tipSeq;
+    if (outcome.kind === "error" && outcome.error === "stale_base") {
+      const healed = await healStaleRace(client, target, planInput, ctx, now, retry);
+      outcome = healed.outcome;
+      tipSeq = healed.tipSeq;
+    }
+    if (outcome.kind === "merged")
+      writeFileSync4(target.localAbs, outcome.pushedBytes);
+    if (outcome.kind === "added" || outcome.kind === "resurrected" || outcome.kind === "fast-forwarded") {
+      writeSidecar(opts.roomId, key, buildSidecar(target.localBytes, "r2:" + outcome.hash), opts.home);
+    } else if (outcome.kind === "unchanged") {
+      writeSidecar(opts.roomId, key, buildSidecar(target.localBytes, localHash), opts.home);
+    } else if (outcome.kind === "merged") {
+      writeSidecar(opts.roomId, key, buildSidecar(outcome.pushedBytes, "r2:" + outcome.hash), opts.home);
+    }
+    rows.push({ repoPath: target.repoPath, outcome, tipSeq });
+    if (outcome.kind === "error") {
+      hardError = { error: outcome.error, detail: outcome.detail, hint: outcome.hint };
+      break;
+    }
+    if (opts.strict && outcome.kind === "conflict-markers-local")
+      break;
+  }
+  const notable = rows.filter((r) => INFORM_WORTHY[r.outcome.kind] === true);
+  const attributable = notable.filter((r) => (r.outcome.kind === "conflict-markers-local" || r.outcome.kind === "forked") && r.tipSeq !== undefined);
+  if (attributable.length > 0) {
+    const authors = await resolveTipAuthors(client, new Set(attributable.map((r) => r.tipSeq)));
+    for (const row of attributable)
+      row.tipAuthor = authors.get(row.tipSeq) ?? null;
+  }
+  let informed = false;
+  if (notable.length > 0) {
+    const r = await retry(() => client.postEntry({ performative: "inform", body: formatPutSignalBody(notable) }), (res) => !res.ok && res.error === "rate_limited", (res) => res.ok ? undefined : res.retry_after_s);
+    informed = r.ok;
+  }
+  if (hardError)
+    return { rows, hardError, informed, exitCode: 2 };
+  return { rows, informed, exitCode: notable.length > 0 ? 1 : 0 };
+}
+function formatPutRowMessage(repoPath, outcome) {
+  switch (outcome.kind) {
+    case "added":
+    case "fast-forwarded":
+      return `  ${repoPath} (uploaded${outcome.deduped ? ", deduped" : ""})`;
+    case "unchanged":
+      return `  ${repoPath} (unchanged)`;
+    case "refused-never-synced":
+      return `  ${repoPath} — two independent copies (never synced) — run 'mesh fs get ${repoPath}' first, then re-put`;
+    case "refused-markers":
+      return `  ${repoPath} — local file still has unresolved conflict markers — resolve them, then re-put (put never uploads marker-bearing content)`;
+    case "skipped-deleted":
+      return `  ${repoPath} (skipped — room deleted this; local copy left untouched)`;
+    case "resurrected":
+      return `  ${repoPath} (resurrected — room had deleted this; your local edits pushed back)`;
+    case "skipped-behind":
+      return `  ${repoPath} — ↓ behind (seq ${outcome.tipSeq}) — run 'mesh fs get ${repoPath}'`;
+    case "merged":
+      return `  ${repoPath} (merged with room)`;
+    case "conflict-markers-local":
+      return `  ${repoPath} — CONFLICT: markers written locally; room untouched — resolve, then re-put (mine stashed: r2:${outcome.stashHash})`;
+    case "forked":
+      return `  ${repoPath} — CONFLICT: room forked as '${outcome.forkPath}' (${outcome.reason}); your local copy is unchanged`;
+    case "locked":
+      return `  ${repoPath} — locked, held by ${outcome.holder} (${outcome.ttlS}s left) — skipped${outcome.watchRegistered ? ", watch registered" : " (watch registration failed — you will not be notified)"}`;
+    case "error":
+      return `  ${repoPath} — [${outcome.error}]${outcome.detail ? " " + outcome.detail : ""}${outcome.hint ? " — " + outcome.hint : ""}`;
+  }
+}
+function formatPutSignalBody(rows) {
+  const lines = rows.map(({ repoPath, outcome, tipSeq, tipAuthor }) => {
+    const attribution = tipSeq === undefined ? "" : tipAuthor ? ` (tip: seq ${tipSeq} by ${tipAuthor})` : ` (tip: seq ${tipSeq})`;
+    switch (outcome.kind) {
+      case "resurrected":
+        return `${repoPath}: resurrected (room had deleted it; local edits pushed back)`;
+      case "conflict-markers-local":
+        return `${repoPath}: markers-local (mine stashed as r2:${outcome.stashHash})${attribution}`;
+      case "forked":
+        return `${repoPath}: forked as '${outcome.forkPath}' (${outcome.reason})${attribution}`;
+      default:
+        return `${repoPath}: ${outcome.kind}`;
+    }
+  });
+  return `fs put: ${rows.length} path(s) need attention
+${lines.join(`
+`)}`;
+}
+function planGetRow(input) {
+  const state = classifySync(input);
+  switch (state) {
+    case "vacuous":
+    case "untracked":
+      return { kind: "noop" };
+    case "room-only":
+      return { kind: "download" };
+    case "orphan-base":
+      return { kind: "drop-sidecar" };
+    case "local-deleted":
+      return { kind: "rehydrate" };
+    case "room-deleted-clean":
+      return { kind: "report-deleted", clean: true };
+    case "room-deleted-dirty":
+      return { kind: "report-deleted", clean: false };
+    case "adopt":
+      return { kind: "adopt" };
+    case "never-synced":
+      return { kind: "fork-theirs" };
+    case "in-sync":
+      return { kind: "noop-insync" };
+    case "ahead":
+      return { kind: "report-ahead" };
+    case "behind":
+      return { kind: "update" };
+    case "converged":
+      return { kind: "sidecar-refresh" };
+    case "diverged":
+      return { kind: "merge-attempt", lane: contentLane(input.policy, input.isBinary) };
+    case "gated":
+      throw new Error(`planGetRow: unreachable state "gated" — planGetTarget guards this before delegating here`);
+  }
+}
+function planGetTarget(input) {
+  if (input.hasMarkers)
+    return { kind: "refused-markers" };
+  if (input.gated)
+    return { kind: "gated" };
+  return planGetRow(input);
+}
+function nextLocalForkPath(repoPath, isTaken) {
+  const slash = repoPath.lastIndexOf("/");
+  const dir = slash === -1 ? "" : repoPath.slice(0, slash + 1);
+  const base = slash === -1 ? repoPath : repoPath.slice(slash + 1);
+  const dot = base.lastIndexOf(".");
+  const stem = dot > 0 ? base.slice(0, dot) : base;
+  const ext = dot > 0 ? base.slice(dot) : "";
+  for (let n = 1;; n++) {
+    const candidate = `${dir}${stem} (${n})${ext}`;
+    if (!isTaken(candidate))
+      return candidate;
+  }
+}
+function requireTipHash(ctx) {
+  const hash = ctx.tip?.contentHash;
+  if (hash !== undefined)
+    return hash;
+  return { error: "gated_tip", detail: `${ctx.repoPath}: content hash unexpectedly missing for a non-gated get action` };
+}
+async function fetchAndWriteTip(ctx, kind) {
+  const tipRef = requireTipHash(ctx);
+  if (typeof tipRef !== "string")
+    return { kind: "error", ...tipRef };
+  let hash;
+  try {
+    hash = hashFromRef(tipRef);
+  } catch (e) {
+    return { kind: "error", error: "bad_content_ref", detail: e instanceof Error ? e.message : String(e) };
+  }
+  const blob = await ctx.client.getArtifact(hash);
+  if (!(blob instanceof Uint8Array))
+    return { kind: "error", error: blob.error, detail: blob.detail, hint: blob.hint };
+  mkdirSync5(dirname5(ctx.localAbs), { recursive: true });
+  writeFileSync4(ctx.localAbs, blob);
+  return { kind, bytes: blob, tipHash: tipRef };
+}
+async function forkTheirsLocally(ctx, reason) {
+  const tipRef = requireTipHash(ctx);
+  if (typeof tipRef !== "string")
+    return { kind: "error", ...tipRef };
+  let hash;
+  try {
+    hash = hashFromRef(tipRef);
+  } catch (e) {
+    return { kind: "error", error: "bad_content_ref", detail: e instanceof Error ? e.message : String(e) };
+  }
+  const blob = await ctx.client.getArtifact(hash);
+  if (!(blob instanceof Uint8Array))
+    return { kind: "error", error: blob.error, detail: blob.detail, hint: blob.hint };
+  const forkPath = nextLocalForkPath(ctx.repoPath, (candidate) => existsSync3(resolve2(ctx.into, candidate)));
+  const forkAbs = resolve2(ctx.into, forkPath);
+  mkdirSync5(dirname5(forkAbs), { recursive: true });
+  writeFileSync4(forkAbs, blob);
+  return reason === "never-synced" ? { kind: "forked-theirs", forkPath, hash: sha256hex(blob) } : { kind: "forked-conflict", forkPath, hash: sha256hex(blob) };
+}
+async function fetchMergeTexts(ctx) {
+  const sidecar = ctx.sidecar;
+  const tipRef = requireTipHash(ctx);
+  if (typeof tipRef !== "string")
+    return { ok: false, ...tipRef };
+  let baseText;
+  if (sidecar.content !== undefined) {
+    baseText = sidecar.content;
+  } else {
+    const baseBlob = await ctx.client.getArtifact(hashFromRef(sidecar.tip_hash));
+    if (!(baseBlob instanceof Uint8Array))
+      return { ok: false, error: "fetch_base_failed", detail: baseBlob.detail };
+    baseText = Buffer.from(baseBlob).toString("utf8");
+  }
+  const tipBlob = await ctx.client.getArtifact(hashFromRef(tipRef));
+  if (!(tipBlob instanceof Uint8Array))
+    return { ok: false, error: "fetch_tip_failed", detail: tipBlob.detail };
+  return { ok: true, baseText, tipText: Buffer.from(tipBlob).toString("utf8"), mineText: Buffer.from(ctx.localBytes).toString("utf8") };
+}
+async function applyGetMergeAttempt(ctx, lane) {
+  switch (lane) {
+    case "binary":
+      return forkTheirsLocally(ctx, "conflict");
+    case "code":
+    case "prose": {
+      const texts = await fetchMergeTexts(ctx);
+      if (!texts.ok)
+        return { kind: "error", error: texts.error, detail: texts.detail };
+      const merge = threeWayMerge(texts.baseText, texts.tipText, texts.mineText);
+      if (merge.ok) {
+        const tipRef = requireTipHash(ctx);
+        if (typeof tipRef !== "string")
+          return { kind: "error", ...tipRef };
+        const mergedBytes = new Uint8Array(Buffer.from(merge.merged, "utf8"));
+        writeFileSync4(ctx.localAbs, mergedBytes);
+        return { kind: "merged-local", bytes: mergedBytes, tipHash: tipRef };
+      }
+      if (lane === "code") {
+        writeFileSync4(ctx.localAbs, merge.conflicted, "utf8");
+        return { kind: "conflict-markers-local" };
+      }
+      return forkTheirsLocally(ctx, "conflict");
+    }
+  }
+}
+async function applyGetTarget(ctx, action) {
+  switch (action.kind) {
+    case "refused-markers":
+      return { kind: "refused-markers" };
+    case "gated":
+      return { kind: "gated" };
+    case "noop":
+      return { kind: "noop" };
+    case "drop-sidecar":
+      return { kind: "dropped-sidecar" };
+    case "download":
+      return fetchAndWriteTip(ctx, "downloaded");
+    case "rehydrate":
+      return fetchAndWriteTip(ctx, "rehydrated");
+    case "report-deleted": {
+      if (!action.clean)
+        return { kind: "deleted-dirty" };
+      if (ctx.prune) {
+        try {
+          unlinkSync(ctx.localAbs);
+        } catch {}
+        return { kind: "deleted-clean", pruned: true };
+      }
+      return { kind: "deleted-clean", pruned: false };
+    }
+    case "adopt": {
+      const tipRef = requireTipHash(ctx);
+      if (typeof tipRef !== "string")
+        return { kind: "error", ...tipRef };
+      return { kind: "adopted", bytes: ctx.localBytes, tipHash: tipRef };
+    }
+    case "fork-theirs":
+      return forkTheirsLocally(ctx, "never-synced");
+    case "noop-insync":
+      return { kind: "unchanged" };
+    case "report-ahead":
+      return { kind: "ahead" };
+    case "update":
+      return fetchAndWriteTip(ctx, "updated");
+    case "sidecar-refresh": {
+      const tipRef = requireTipHash(ctx);
+      if (typeof tipRef !== "string")
+        return { kind: "error", ...tipRef };
+      return { kind: "converged", bytes: ctx.localBytes, tipHash: tipRef };
+    }
+    case "merge-attempt":
+      return applyGetMergeAttempt(ctx, action.lane);
+  }
+}
+var GET_EXIT1 = {
+  "forked-theirs": true,
+  "conflict-markers-local": true,
+  "forked-conflict": true,
+  "refused-markers": true,
+  "path-escape": true,
+  gated: true
+};
+function getRowNeedsVerify(outcome) {
+  switch (outcome.kind) {
+    case "ahead":
+    case "deleted-dirty":
+    case "forked-theirs":
+    case "conflict-markers-local":
+    case "forked-conflict":
+    case "refused-markers":
+    case "gated":
+    case "path-escape":
+      return true;
+    case "deleted-clean":
+      return !outcome.pruned;
+    default:
+      return false;
+  }
+}
+async function runGetBatch(client, opts) {
+  const treeResult = await client.getTree(opts.treePrefix);
+  if ("error" in treeResult)
+    return { rows: [], hardError: { error: treeResult.error, detail: treeResult.detail }, exitCode: 2 };
+  const tipByPath = new Map;
+  for (const n of treeResult.tree)
+    tipByPath.set(n.path, { contentHash: n.content_hash, tipSeq: n.tip_seq });
+  const allPaths = new Set((opts.targets ?? []).map(normalizeId));
+  if (!opts.explicitOnly)
+    for (const p of tipByPath.keys())
+      allPaths.add(p);
+  const sortedPaths = [...allPaths].sort();
+  const base = resolve2(opts.into);
+  const rows = [];
+  let hardError;
+  for (const repoPath of sortedPaths) {
+    const abs2 = resolve2(opts.into, repoPath);
+    if (abs2 !== base && !abs2.startsWith(base + sep2)) {
+      rows.push({ repoPath, state: "vacuous", localAbs: abs2, outcome: { kind: "path-escape" } });
+      continue;
+    }
+    let localBytes;
+    try {
+      localBytes = new Uint8Array(readFileSync5(abs2));
+    } catch {
+      localBytes = undefined;
+    }
+    const key = normalizeId(repoPath);
+    const sidecar = readSidecar(opts.roomId, key, opts.home);
+    const tip = tipByPath.get(repoPath);
+    const gated = tip !== undefined && !tip.contentHash;
+    const planInput = {
+      localHash: localBytes !== undefined ? "r2:" + sha256hex(localBytes) : undefined,
+      baseTipHash: sidecar?.tip_hash,
+      tipHash: tip?.contentHash,
+      policy: policyFor(repoPath),
+      isBinary: localBytes !== undefined && !isValidUtf8Bytes(localBytes),
+      hasMarkers: hasPreExistingConflictMarkers(localBytes ? Buffer.from(localBytes) : undefined),
+      gated
+    };
+    const state = classifySync(planInput);
+    const action = planGetTarget(planInput);
+    const ctx = { client, repoPath, into: opts.into, localAbs: abs2, localBytes, sidecar, tip, prune: opts.prune };
+    const outcome = await applyGetTarget(ctx, action);
+    if (outcome.kind === "downloaded" || outcome.kind === "rehydrated" || outcome.kind === "updated" || outcome.kind === "adopted" || outcome.kind === "converged" || outcome.kind === "merged-local") {
+      writeSidecar(opts.roomId, key, buildSidecar(outcome.bytes, outcome.tipHash), opts.home);
+    } else if (outcome.kind === "dropped-sidecar") {
+      dropSidecar(opts.roomId, key, opts.home);
+    } else if (outcome.kind === "deleted-clean" && outcome.pruned) {
+      dropSidecar(opts.roomId, key, opts.home);
+    }
+    rows.push({ repoPath, state, outcome, localAbs: abs2 });
+    if (outcome.kind === "error") {
+      hardError = { error: outcome.error, detail: outcome.detail, hint: outcome.hint };
+      break;
+    }
+  }
+  const exitCode = hardError ? 2 : rows.some((r) => GET_EXIT1[r.outcome.kind]) ? 1 : 0;
+  return { rows, hardError, exitCode };
+}
+function formatGetRowMessage(repoPath, outcome) {
+  switch (outcome.kind) {
+    case "noop":
+    case "unchanged":
+      return;
+    case "dropped-sidecar":
+      return `  ${repoPath} (stale sync record dropped — room no longer has this)`;
+    case "downloaded":
+      return `  ${repoPath} (downloaded)`;
+    case "rehydrated":
+      return `  ${repoPath} (re-hydrated)`;
+    case "deleted-clean":
+      return outcome.pruned ? `  ${repoPath} (room deleted this; local copy pruned)` : `  ${repoPath} — room deleted this; local copy untouched — 'fs get --prune' to remove it`;
+    case "deleted-dirty":
+      return `  ${repoPath} — room deleted this but you have unsynced local edits; local copy kept — 'fs put ${repoPath}' to resurrect it in the room, or delete it yourself`;
+    case "adopted":
+      return `  ${repoPath} (adopted — sync base recorded)`;
+    case "forked-theirs":
+      return `  ${repoPath} — two independent copies (never synced): kept yours, room's copy landed as '${outcome.forkPath}'`;
+    case "ahead":
+      return `  ${repoPath} — ↑ ahead (unsynced local edits) — run 'mesh fs put ${repoPath}'`;
+    case "updated":
+      return `  ${repoPath} (updated ← room)`;
+    case "converged":
+      return `  ${repoPath} (converged — sync base refreshed)`;
+    case "merged-local":
+      return `  ${repoPath} (merged locally — run 'mesh fs put ${repoPath}' to push)`;
+    case "conflict-markers-local":
+      return `  ${repoPath} — CONFLICT: markers written locally; resolve, then 'mesh fs put ${repoPath}' to push`;
+    case "forked-conflict":
+      return `  ${repoPath} — CONFLICT: room's version landed as '${outcome.forkPath}'; your local copy is unchanged`;
+    case "refused-markers":
+      return `  ${repoPath} — local file still has unresolved conflict markers — resolve them first (get never overwrites marker-bearing content)`;
+    case "gated":
+      return `  ${repoPath} — discoverable but content is gated — you lack a read grant on this path`;
+    case "path-escape":
+      return `  ${repoPath} — path escapes target directory — skipped`;
+    case "error":
+      return `  ${repoPath} — [${outcome.error}]${outcome.detail ? " " + outcome.detail : ""}${outcome.hint ? " — " + outcome.hint : ""}`;
+  }
 }
 
 // src/main.ts
@@ -9204,8 +10216,8 @@ function getVersion() {
   if (true)
     return "1.14.0";
   try {
-    const here = dirname5(fileURLToPath(import.meta.url));
-    return readFileSync5(resolve2(here, "../../../VERSION"), "utf8").trim();
+    const here = dirname6(fileURLToPath(import.meta.url));
+    return readFileSync6(resolve3(here, "../../../VERSION"), "utf8").trim();
   } catch {
     return "unknown";
   }
@@ -9213,90 +10225,32 @@ function getVersion() {
 function grepLine(r) {
   return `${r.path}: ${r.snippet}`;
 }
-async function hydrateGrepWinners(client, paths, into) {
+async function hydrateGrepWinners(client, paths, into, roomId, home) {
   if (paths.length === 0)
-    return;
-  const t = await client.getTree();
-  if ("error" in t) {
-    process.stderr.write(`fs grep: hydrate: [${t.error}] ${t.detail}
-`);
-    process.exit(1);
+    return { rows: [], exitCode: 0 };
+  const result = await runGetBatch(client, { roomId, home, into, prune: false, targets: paths, explicitOnly: true });
+  for (const row of result.rows) {
+    const line = formatGetRowMessage(row.repoPath, row.outcome);
+    if (line)
+      ok5(line);
   }
-  for (const p of paths) {
-    const node = resolveNode(t.tree, p);
-    if (!node) {
-      process.stderr.write(`fs grep: hydrate: not in tree: ${p}
-`);
-      continue;
-    }
-    let hash;
-    try {
-      hash = hashFromRef(node.content_hash);
-    } catch (e) {
-      process.stderr.write(`fs grep: hydrate: ${e instanceof Error ? e.message : String(e)}
-`);
-      continue;
-    }
-    const blob = await client.getArtifact(hash);
-    if (!(blob instanceof Uint8Array)) {
-      process.stderr.write(`fs grep: hydrate: [${blob.error}] ${blob.detail}
-`);
-      continue;
-    }
-    const base = resolve2(into);
-    const dest = resolve2(into, node.path);
-    if (dest !== base && !dest.startsWith(base + sep2)) {
-      process.stderr.write(`fs grep: hydrate: path escapes target directory: ${p}
-`);
-      continue;
-    }
-    mkdirSync5(dirname5(dest), { recursive: true });
-    writeFileSync4(dest, blob);
-    ok5(dest);
-  }
+  return result;
 }
-async function hydrateSubtree(client, prefix, into) {
-  const t = await client.getTree(prefix || undefined);
-  if ("error" in t) {
-    process.stderr.write(`fs hydrate: [${t.error}] ${t.detail}
-`);
-    process.exit(1);
+async function hydrateSubtree(client, prefix, into, roomId, home, prune = false) {
+  const result = await runGetBatch(client, { roomId, home, into, prune, treePrefix: prefix || undefined });
+  for (const row of result.rows) {
+    const line = formatGetRowMessage(row.repoPath, row.outcome);
+    if (line)
+      ok5(line);
   }
-  const written = [];
-  for (const node of t.tree) {
-    let hash;
-    try {
-      hash = hashFromRef(node.content_hash);
-    } catch (e) {
-      process.stderr.write(`fs hydrate: ${e instanceof Error ? e.message : String(e)}
-`);
-      continue;
-    }
-    const blob = await client.getArtifact(hash);
-    if (!(blob instanceof Uint8Array)) {
-      process.stderr.write(`fs hydrate: [${blob.error}] ${blob.detail}
-`);
-      continue;
-    }
-    const base = resolve2(into);
-    const dest = resolve2(into, node.path);
-    if (dest !== base && !dest.startsWith(base + sep2)) {
-      process.stderr.write(`fs hydrate: path escapes target directory: ${node.path}
-`);
-      continue;
-    }
-    mkdirSync5(dirname5(dest), { recursive: true });
-    writeFileSync4(dest, blob);
-    written.push(dest);
-  }
-  return written;
+  return result;
 }
 function localSizes(paths, into) {
-  const base = resolve2(into);
+  const base = resolve3(into);
   const sizes = {};
   for (const path3 of paths) {
-    const dest = resolve2(into, path3);
-    if (dest !== base && !dest.startsWith(base + sep2))
+    const dest = resolve3(into, path3);
+    if (dest !== base && !dest.startsWith(base + sep3))
       continue;
     try {
       sizes[path3] = statSync(dest).size;
@@ -9930,8 +10884,8 @@ async function cmdChat(args2) {
   let senderWidth = widths.length > 0 ? Math.min(28, Math.max(12, Math.max(...widths))) : undefined;
   let since = head.seq;
   let inputExit;
-  const inputClosed = new Promise((resolve3) => {
-    inputExit = resolve3;
+  const inputClosed = new Promise((resolve4) => {
+    inputExit = resolve4;
   });
   const ac = new AbortController;
   const input = startChatInput({
@@ -10104,7 +11058,8 @@ async function cmdDeliver(args2) {
     roomId,
     secretBytes: identity.secretBytes
   });
-  const { bytes, hash, size: size2 } = await packDir(m.dir);
+  const excludes = [".git", ".meshignore", ...meshignoreToTarExcludes(loadMeshignore(m.dir))];
+  const { bytes, hash, size: size2 } = await packDir(m.dir, { exclude: excludes });
   const put = await client.putArtifact(hash, bytes);
   if (!put.ok)
     die5(`deliver: artifact upload failed: [${put.error}] ${put.detail}`);
@@ -10173,7 +11128,7 @@ async function cmdFetch(args2) {
   if (!(bytes instanceof Uint8Array))
     die5(`fetch: [${bytes.error}] ${bytes.detail}${bytes.hint ? " — " + bytes.hint : ""}`);
   const name = arg.startsWith("r2:") ? ref.hash : arg;
-  const dest = resolve2(flag5(args2, "into") ?? join5(home ?? meshHome(), "artifacts", name));
+  const dest = resolve3(flag5(args2, "into") ?? join5(home ?? meshHome(), "artifacts", name));
   await unpackInto(bytes, dest);
   ok5(`Extracted to ${dest}`);
 }
@@ -10181,11 +11136,11 @@ var REFETCH_DEBOUNCE_MS = 300;
 var TICK_MS = 5000;
 var RECENT_LINES_CAP = 6;
 function cancelableDelay(ms) {
-  const { promise, resolve: resolve3 } = Promise.withResolvers();
-  const timer = setTimeout(resolve3, ms);
+  const { promise, resolve: resolve4 } = Promise.withResolvers();
+  const timer = setTimeout(resolve4, ms);
   return { promise, cancel: () => {
     clearTimeout(timer);
-    resolve3();
+    resolve4();
   } };
 }
 function startTicker(ms, onTick) {
@@ -10222,7 +11177,7 @@ async function followFilePlane(client, since, onLine) {
 function walkDirFiles(root, isIgnored) {
   const out = [];
   const rec = (dir, rel) => {
-    for (const ent of readdirSync2(dir, { withFileTypes: true })) {
+    for (const ent of readdirSync3(dir, { withFileTypes: true })) {
       const childRel = rel ? `${rel}/${ent.name}` : ent.name;
       if (isIgnored(childRel))
         continue;
@@ -10235,8 +11190,88 @@ function walkDirFiles(root, isIgnored) {
   rec(root, "");
   return out.sort();
 }
+async function withRateRetry(attempt, isRateLimited, retryAfterS) {
+  let r = await attempt();
+  let waited = 0;
+  while (isRateLimited(r) && waited < 300) {
+    const waitS = Math.max(1, retryAfterS(r) ?? 5);
+    process.stderr.write(`  … rate-limited; waiting ${waitS}s
+`);
+    await new Promise((res) => setTimeout(res, waitS * 1000));
+    waited += waitS;
+    r = await attempt();
+  }
+  return r;
+}
+async function statusScan(client, opts) {
+  const { prefix, root, home, deep } = opts;
+  const normPrefix = prefix ? normalizeId(prefix) : "";
+  const [treeResult, leasesResult] = await Promise.all([
+    client.getTree(prefix || undefined),
+    client.listLeases()
+  ]);
+  if ("error" in treeResult)
+    die5(`fs status: [${treeResult.error}] ${treeResult.detail}`);
+  if (!Array.isArray(leasesResult))
+    die5(`fs status: [${leasesResult.error}] ${leasesResult.detail}`);
+  const scanDir = normPrefix ? join5(root, normPrefix) : root;
+  const localAbsByPath = new Map;
+  try {
+    const st = statSync(scanDir);
+    if (st.isDirectory()) {
+      for (const rel of walkDirFiles(scanDir, makeIgnore(loadMeshignore(scanDir), {}))) {
+        const repoPath = normalizeId([normPrefix, rel].filter((s) => s.length > 0).join("/"));
+        localAbsByPath.set(repoPath, join5(scanDir, rel));
+      }
+    } else if (st.isFile() && normPrefix) {
+      localAbsByPath.set(normPrefix, scanDir);
+    }
+  } catch {}
+  const local = new Map;
+  for (const [p, abs2] of localAbsByPath) {
+    const bytes = readFileSync6(abs2);
+    const text = isValidUtf8Bytes(new Uint8Array(bytes)) ? bytes.toString("utf8") : undefined;
+    local.set(p, { hash: "r2:" + sha256hex(new Uint8Array(bytes)), text });
+  }
+  const tip = new Map(treeResult.tree.map((n) => [n.path, n]));
+  const lease = new Map(leasesResult.map((l) => [l.path, { holder: l.holder, expiresAtMs: l.lease_expires }]));
+  const sidecarOnlyPaths = listSidecarPaths(client.roomId, home).filter((p) => !normPrefix || p === normPrefix || p.startsWith(normPrefix + "/"));
+  const baseTipHash = new Map;
+  for (const p of new Set([...local.keys(), ...tip.keys(), ...sidecarOnlyPaths])) {
+    const sidecar = readSidecar(client.roomId, p, home);
+    if (sidecar)
+      baseTipHash.set(p, sidecar.tip_hash);
+  }
+  const rows = composeStatusRows({ local, tip, baseTipHash, lease, sidecarOnlyPaths }, Date.now());
+  if (deep) {
+    for (const row of rows) {
+      if (row.state !== "diverged")
+        continue;
+      const localAbs = localAbsByPath.get(row.path);
+      const node = tip.get(row.path);
+      const sidecar = readSidecar(client.roomId, row.path, home);
+      if (!localAbs || !node?.content_hash || !sidecar || sidecar.content === undefined)
+        continue;
+      const localBytes = readFileSync6(localAbs);
+      if (!isValidUtf8Bytes(new Uint8Array(localBytes)))
+        continue;
+      let hash;
+      try {
+        hash = hashFromRef(node.content_hash);
+      } catch {
+        continue;
+      }
+      const tipBlob = await client.getArtifact(hash);
+      if (!(tipBlob instanceof Uint8Array) || !isValidUtf8Bytes(tipBlob))
+        continue;
+      const verdict = dryRunMergeVerdict(threeWayMerge(sidecar.content, Buffer.from(tipBlob).toString("utf8"), localBytes.toString("utf8")));
+      row.detail = row.detail ? `${row.detail}; ${verdict}` : verdict;
+    }
+  }
+  return rows;
+}
 var FS_CMDS = {
-  put: async (client, args2) => {
+  put: async (client, args2, senderId) => {
     const localPath = args2.positional[0];
     if (!localPath)
       die5("fs put: <path> is required");
@@ -10248,45 +11283,57 @@ var FS_CMDS = {
     }
     if (!exists)
       die5(`fs put: no such file or directory: ${localPath}`);
+    const home = flag5(args2, "home");
+    const strict = flagBool2(args2, "strict");
+    let targets;
+    let treePrefix;
+    let batchLabel;
     if (isDir) {
       const prefix = (flag5(args2, "as") ?? localPath).replace(/\\/g, "/").split("/").filter((s) => s.length > 0 && s !== ".").join("/");
       const isIgnored = makeIgnore(loadMeshignore(localPath), { includeHidden: flagBool2(args2, "all") });
       const rels = walkDirFiles(localPath, isIgnored);
       if (rels.length === 0)
         die5(`fs put: ${localPath} has no eligible files (hidden entries skipped unless --all; .meshignore patterns applied)`);
-      let deduped = 0;
-      for (const rel of rels) {
-        const repoPath = [prefix, rel].filter((s) => s.length > 0).join("/");
-        const bytes2 = new Uint8Array(readFileSync5(join5(localPath, rel)));
-        const r = await fsPutOcc(client, repoPath, bytes2);
-        if (!r.ok) {
-          if (r.kind === "conflict")
-            die5(`fs put: merge conflict in ${repoPath} — resolve it with a single-file 'fs put' (fs get it first)`);
-          die5(`fs put: ${repoPath}: [${r.error}]${r.detail ? " " + r.detail : ""}${r.hint ? " — " + r.hint : ""}`);
-        }
-        if (r.deduped)
-          deduped++;
-        ok5(`  ${repoPath} (${bytes2.length}b${r.deduped ? ", deduped" : ""})`);
-      }
-      ok5(`fs put: ${rels.length} file(s) from ${localPath}/ → ${prefix || "(room root)"}${deduped ? ` — ${deduped} deduped` : ""}`);
+      targets = rels.map((rel) => ({
+        repoPath: [prefix, rel].filter((s) => s.length > 0).join("/"),
+        localAbs: join5(localPath, rel),
+        localBytes: new Uint8Array(readFileSync6(join5(localPath, rel)))
+      }));
+      treePrefix = prefix;
+      batchLabel = `${rels.length} file(s) from ${localPath}/ → ${prefix || "(room root)"}`;
+    } else {
+      const as = flag5(args2, "as") ?? localPath;
+      targets = [{ repoPath: as, localAbs: localPath, localBytes: new Uint8Array(readFileSync6(localPath)) }];
+      treePrefix = as;
+      batchLabel = as;
+    }
+    const result = await runPutBatch(client, targets, {
+      roomId: client.roomId,
+      home,
+      selfId: senderId,
+      strict,
+      treePrefix,
+      retry: withRateRetry
+    });
+    for (const row of result.rows)
+      ok5(formatPutRowMessage(row.repoPath, row.outcome));
+    if (result.hardError) {
+      const e = result.hardError;
+      process.stderr.write(`fs put: [${e.error}]${e.detail ? " " + e.detail : ""}${e.hint ? " — " + e.hint : ""}
+`);
+      process.exitCode = 2;
       return;
     }
-    const as = flag5(args2, "as") ?? localPath;
-    const bytes = new Uint8Array(readFileSync5(localPath));
-    const result = await fsPutOcc(client, as, bytes);
-    if (!result.ok) {
-      if (result.kind === "conflict") {
-        writeFileSync4(localPath, result.conflictedText, "utf8");
-        die5(`fs put: merge conflict in ${as} — conflict markers written to ${localPath}`);
-      }
-      die5(`fs put: [${result.error}]${result.detail ? " " + result.detail : ""}${result.hint ? " — " + result.hint : ""}`);
-    }
-    ok5(`fs put ${as} (r2:${result.hash}, ${bytes.length} bytes, ${result.deduped ? "deduped" : "uploaded"})`);
+    const unchanged = result.rows.filter((r) => r.outcome.kind === "unchanged").length;
+    ok5(`fs put: ${batchLabel}${result.informed ? " — conflicts/forks/resurrections signaled (see 'mesh fs status')" : ""}`);
+    if (unchanged > 0)
+      ok5(`verify: mesh fs status${treePrefix ? " " + treePrefix : ""}`);
+    process.exitCode = result.exitCode;
   },
   ls: async (client, args2) => {
     const prefix = args2.positional[0];
     const follow = flagBool2(args2, "f");
-    const into = flag5(args2, "into") ?? ".mesh/fs";
+    const into = resolveWorkspaceRoot(flag5(args2, "into"), flag5(args2, "root"));
     const [treeResult, leasesResult, state] = await Promise.all([
       client.getTree(prefix),
       client.listLeases(),
@@ -10373,39 +11420,43 @@ var FS_CMDS = {
     const repopath = args2.positional[0];
     if (!repopath)
       die5("fs get: <repopath> is required");
-    const into = flag5(args2, "into") ?? ".mesh/fs";
-    const t = await client.getTree();
-    if ("error" in t)
-      die5(`fs get: [${t.error}] ${t.detail}`);
-    const node = resolveNode(t.tree, repopath);
-    if (!node) {
-      const norm = normalizeId(repopath);
-      if (t.tree.some((n) => n.path.startsWith(norm + "/"))) {
-        const paths = await hydrateSubtree(client, norm, into);
-        ok5(`fs get: hydrated ${paths.length} file(s) under ${norm} → ${resolve2(into)}`);
-        return;
-      }
-      die5(`fs get: not in tree: ${repopath}`);
+    const into = resolveWorkspaceRoot(flag5(args2, "into"), flag5(args2, "root"));
+    const home = flag5(args2, "home");
+    const prune = flagBool2(args2, "prune");
+    const result = await runGetBatch(client, {
+      roomId: client.roomId,
+      home,
+      into,
+      prune,
+      treePrefix: repopath,
+      targets: [repopath]
+    });
+    if (result.hardError) {
+      const e = result.hardError;
+      process.stderr.write(`fs get: [${e.error}]${e.detail ? " " + e.detail : ""}${e.hint ? " — " + e.hint : ""}
+`);
+      process.exitCode = 2;
+      return;
     }
-    if (!node.content_hash) {
+    if (result.rows.every((r) => r.outcome.kind === "noop"))
+      die5(`fs get: not in tree: ${repopath}`);
+    if (result.rows.length === 1 && result.rows[0].outcome.kind === "gated") {
       die5(`fs get: '${repopath}' is discoverable but its content is gated — you lack a read grant on this path`);
     }
-    let hash;
-    try {
-      hash = hashFromRef(node.content_hash);
-    } catch (e) {
-      die5(`fs get: ${e instanceof Error ? e.message : String(e)}`);
+    let printed = false;
+    for (const row of result.rows) {
+      const line = formatGetRowMessage(row.repoPath, row.outcome);
+      if (line) {
+        ok5(line);
+        printed = true;
+      }
     }
-    const blob = await client.getArtifact(hash);
-    if (!(blob instanceof Uint8Array))
-      die5(`fs get: [${blob.error}] ${blob.detail}${blob.hint ? " — " + blob.hint : ""}`);
-    const base = resolve2(into);
-    const dest = resolve2(into, node.path);
-    if (dest !== base && !dest.startsWith(base + sep2))
-      die5("fs get: path escapes target directory");
-    mkdirSync5(dirname5(dest), { recursive: true });
-    writeFileSync4(dest, blob);
-    ok5(dest);
+    if (!printed) {
+      ok5(result.rows.length > 1 ? `  ${repopath} (${result.rows.length} file(s), all in sync)` : `  ${repopath} (unchanged)`);
+    }
+    if (result.rows.some((r) => getRowNeedsVerify(r.outcome)))
+      ok5(`verify: mesh fs status ${repopath}`);
+    process.exitCode = result.exitCode;
   },
   rm: async (client, args2) => {
     const repopath = args2.positional[0];
@@ -10420,7 +11471,7 @@ var FS_CMDS = {
       if (targets.length === 0)
         die5(`fs rm: nothing under: ${repopath}`);
       for (const n of targets) {
-        const r2 = await client.postEntry({ performative: "file.delete", data: { path: n.path } });
+        const r2 = await withRateRetry(() => client.postEntry({ performative: "file.delete", data: { path: n.path } }), (x) => !x.ok && x.error === "rate_limited", (x) => !x.ok ? x.retry_after_s : undefined);
         if (!r2.ok)
           die5(`fs rm: ${n.path}: [${r2.error}] ${r2.detail}${r2.hint ? " — " + r2.hint : ""}`);
         ok5(`  rm ${n.path}`);
@@ -10428,7 +11479,7 @@ var FS_CMDS = {
       ok5(`fs rm: ${targets.length} file(s) under ${norm}`);
       return;
     }
-    const r = await client.postEntry({ performative: "file.delete", data: { path: repopath } });
+    const r = await withRateRetry(() => client.postEntry({ performative: "file.delete", data: { path: repopath } }), (x) => !x.ok && x.error === "rate_limited", (x) => !x.ok ? x.retry_after_s : undefined);
     if (!r.ok)
       die5(`fs rm: [${r.error}] ${r.detail}${r.hint ? " — " + r.hint : ""}`);
     ok5(`fs rm ${repopath}`);
@@ -10472,7 +11523,7 @@ var FS_CMDS = {
     const limitStr = flag5(args2, "limit");
     const limit = limitStr ? parseInt(limitStr, 10) : undefined;
     const doHydrate = flagBool2(args2, "hydrate");
-    const into = flag5(args2, "into") ?? ".mesh/fs";
+    const into = resolveWorkspaceRoot(flag5(args2, "into"), flag5(args2, "root"));
     const result = await client.search(query, { prefix, limit });
     if ("error" in result) {
       if (result.error === "search_unavailable") {
@@ -10492,17 +11543,40 @@ var FS_CMDS = {
       ok5(grepLine(r));
     if (!doHydrate)
       return;
-    await hydrateGrepWinners(client, result.results.map((r) => r.path), into);
+    const home = flag5(args2, "home");
+    const hydrateResult = await hydrateGrepWinners(client, result.results.map((r) => r.path), into, client.roomId, home);
+    if (hydrateResult.hardError) {
+      const e = hydrateResult.hardError;
+      process.stderr.write(`fs grep --hydrate: [${e.error}]${e.detail ? " " + e.detail : ""}
+`);
+      process.exitCode = 2;
+      return;
+    }
+    if (hydrateResult.rows.some((r) => getRowNeedsVerify(r.outcome)))
+      ok5("verify: mesh fs status");
+    process.exitCode = hydrateResult.exitCode;
   },
   hydrate: async (client, args2) => {
     const prefix = args2.positional[0] ?? "";
-    const into = flag5(args2, "into") ?? ".mesh/fs";
-    const paths = await hydrateSubtree(client, prefix, into);
-    if (paths.length === 0) {
+    const into = resolveWorkspaceRoot(flag5(args2, "into"), flag5(args2, "root"));
+    const home = flag5(args2, "home");
+    const prune = flagBool2(args2, "prune");
+    const result = await hydrateSubtree(client, prefix, into, client.roomId, home, prune);
+    if (result.hardError) {
+      const e = result.hardError;
+      process.stderr.write(`fs hydrate: [${e.error}]${e.detail ? " " + e.detail : ""}
+`);
+      process.exitCode = 2;
+      return;
+    }
+    if (result.rows.length === 0) {
       ok5("(nothing to hydrate)");
       return;
     }
-    ok5(`hydrated ${paths.length} file(s) into ${resolve2(into)}`);
+    ok5(`fs hydrate: ${result.rows.length} path(s) under ${prefix || "(room root)"} → ${resolve3(into)}`);
+    if (result.rows.some((r) => getRowNeedsVerify(r.outcome)))
+      ok5(`verify: mesh fs status${prefix ? " " + prefix : ""}`);
+    process.exitCode = result.exitCode;
   },
   log: async (client, args2) => {
     const follow = flagBool2(args2, "f");
@@ -10619,13 +11693,84 @@ var FS_CMDS = {
     if (!r.ok)
       die5(`fs request: [${r.error}] ${r.detail}${r.hint ? " — " + r.hint : ""}`);
     ok5(`fs request ${grade} on ${requestPath} (seq=${r.seq})`);
+  },
+  status: async (client, args2) => {
+    const prefix = args2.positional[0] ?? "";
+    const deep = flagBool2(args2, "deep");
+    const porcelain = flagBool2(args2, "porcelain");
+    const home = flag5(args2, "home");
+    const root = resolve3(flag5(args2, "root") ?? ".");
+    const rows = await statusScan(client, { prefix, root, home, deep });
+    const normPrefix = prefix ? normalizeId(prefix) : "";
+    if (!porcelain)
+      ok5(`fs status: ${rows.length} path(s) under ${normPrefix || "."} (room=${client.roomId})`);
+    for (const row of rows)
+      ok5(formatStatusLine(row, { porcelain }));
+    if (!porcelain) {
+      const needsGet = rows.find((r) => r.state === "behind" || r.state === "diverged");
+      if (needsGet)
+        ok5(`next: mesh fs get ${needsGet.path}`);
+    }
+  },
+  diff: async (client, args2) => {
+    const repopath = args2.positional[0];
+    if (!repopath)
+      die5("fs diff: <path> is required");
+    const showBase = flagBool2(args2, "base");
+    const root = resolve3(flag5(args2, "root") ?? ".");
+    const home = flag5(args2, "home");
+    const t = await client.getTree();
+    if ("error" in t)
+      die5(`fs diff: [${t.error}] ${t.detail}`);
+    const node = resolveNode(t.tree, repopath);
+    if (!node)
+      die5(`fs diff: not in tree: ${repopath}`);
+    if (!node.content_hash)
+      die5(`fs diff: '${repopath}' is discoverable but its content is gated — you lack a read grant on this path`);
+    const norm = normalizeId(repopath);
+    let localBytes;
+    try {
+      localBytes = readFileSync6(join5(root, repopath));
+    } catch {
+      die5(`fs diff: no local copy at ${resolve3(root, repopath)} — run 'mesh fs get ${repopath}' first`);
+    }
+    let hash;
+    try {
+      hash = hashFromRef(node.content_hash);
+    } catch (e) {
+      die5(`fs diff: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    const blob = await client.getArtifact(hash);
+    if (!(blob instanceof Uint8Array))
+      die5(`fs diff: [${blob.error}] ${blob.detail}${blob.hint ? " — " + blob.hint : ""}`);
+    if (!isValidUtf8Bytes(new Uint8Array(localBytes)) || !isValidUtf8Bytes(blob)) {
+      ok5(`binary differs: ${localBytes.length}b vs ${blob.length}b`);
+      return;
+    }
+    const mineText = localBytes.toString("utf8");
+    const tipText = Buffer.from(blob).toString("utf8");
+    const sidecar = readSidecar(client.roomId, norm, home);
+    if (!sidecar)
+      ok5("(no sync base — comparing mine vs tip only)");
+    if (showBase && sidecar) {
+      if (sidecar.content === undefined) {
+        ok5("(sidecar stores hash only — base text not cached locally; comparing mine vs tip only)");
+      } else {
+        ok5("# base -> mine");
+        ok5(unifiedDiff(sidecar.content, mineText, "base", "mine"));
+        ok5("# base -> tip");
+        ok5(unifiedDiff(sidecar.content, tipText, "base", "tip"));
+        return;
+      }
+    }
+    ok5(unifiedDiff(mineText, tipText, "mine", "tip"));
   }
 };
 async function cmdFs(args2) {
   const sub = args2.positional.shift();
   const handler = sub ? FS_CMDS[sub] : undefined;
   if (!handler) {
-    die5(`usage: mesh fs put <path> [--as <repopath>] | ls [<prefix>] [-f] [--into <dir>] | get <repopath> [--into <dir>] | rm <repopath> | edit <path> [--into <dir>] | lock <path> | unlock <path> | grep <query> [--prefix <path-prefix>] [--limit <n>] [--hydrate [--into <dir>]] | hydrate [<prefix>] [--into <dir>] | grant <subject> <path> <grade> | grants | revoke <subject> <path> | role <participant> <role> | roles | role-rm <participant> <role> | leases | config <open|closed> | deps <path> | request <path> [--grade read]
+    die5(`usage: mesh fs put <path> [--as <repopath>] [--strict] | ls [<prefix>] [-f] [--into <dir>] | get <repopath> [--into <dir>] [--prune] | rm <repopath> | edit <path> [--into <dir>] | lock <path> | unlock <path> | grep <query> [--prefix <path-prefix>] [--limit <n>] [--hydrate [--into <dir>]] | hydrate [<prefix>] [--into <dir>] [--prune] | grant <subject> <path> <grade> | grants | revoke <subject> <path> | role <participant> <role> | roles | role-rm <participant> <role> | leases | config <open|closed> | deps <path> | request <path> [--grade read] | status [<prefix>] [--deep] [--porcelain] [--root <dir>] | diff <path> [--base] [--root <dir>]
   write policy by extension: code (.ts .js .py .go .rs …) -> merge on \`put\` · prose (.md .txt) -> shared CRDT via \`edit\` · opt-in serialize: \`lock\`/\`unlock\`
   grades: discover < read < write < exclusive`);
   }
@@ -10843,7 +11988,7 @@ tasks:
              --depends-on <ref[,ref]>
   claim <task_ref>                                          Claim a task (first writer wins — CAS)
   release <task_ref>                                        Release a held task
-  deliver <task_ref> [--dir <path> | --artifact <ref>] [--body <s>]    Deliver artifacts
+  deliver <task_ref> [--dir <path> | --artifact <ref>] [--body <s>]    Deliver artifacts (--dir: tars the tree, honoring .meshignore + always excluding .git)
   accept <task_ref> [--body <s>]                            Accept delivery → DONE
   reject <task_ref> --body <reason>                         Reject delivery → back to ANNOUNCED
   inform <task_ref> --body <s>                              Post a progress update (no state change)
@@ -10853,16 +11998,17 @@ tasks:
             [--mention-me] [--path <p>] [--participant <id>]
 
 files:
+  (workspace root = cwd by default, --root <dir> overrides, --into <dir> stays for one-off scratch staging; identity = normalizeId(path) relative to that root, same in the room tree)
   fs put <path|dir> [--as <repopath>] [--all]               Upload a file, or a directory (recursive); .meshignore excludes, --all includes hidden files
-  fs ls [<prefix>] [-f] [--into <dir>]                      List the shared workspace tree (-f: live view — tree, leases, hydration)
-  fs get <repopath|prefix> [--into <dir>]                   Hydrate a file — or a whole subtree if given a directory prefix (default: .mesh/fs)
+  fs ls [<prefix>] [-f] [--into <dir>|--root <dir>]         List the shared workspace tree (-f: live view — tree, leases, hydration); local column compares against the workspace root
+  fs get <repopath|prefix> [--into <dir>|--root <dir>] [--prune]  Hydrate a file — or a whole subtree if given a directory prefix, into the workspace root (default: cwd); safe by default (never overwrites local-ahead/marker-bearing work, see fs status); --prune drops local copies the room cleanly deleted
   fs rm <repopath> [-r]                                     Delete a file (or a whole subtree with -r)
-  fs edit <path> [--into <dir>]                             Subscribe + edit a live Yjs doc (Ctrl+C to exit)
+  fs edit <path> [--into <dir>|--root <dir>]                Subscribe + edit a live Yjs doc (Ctrl+C to exit)
   fs lock <path>                                            Acquire exclusive lease (file.lock)
   fs unlock <path>                                          Release exclusive lease (file.unlock)
   fs grep <query> [--prefix p] [--limit n] [--hydrate]     Search file content; --hydrate fetches matched files
   fs log [-f]                                               Show workspace changes (file.*, system.grant/role/revoke/lease_clear/config) (-f: follow)
-  fs hydrate [<prefix>] [--into <dir>]                      Bulk-download subtree to disk (default: .mesh/fs)
+  fs hydrate [<prefix>] [--into <dir>|--root <dir>] [--prune]  Bulk-download subtree to disk, into the workspace root (default: cwd); same safety + --prune as fs get
   fs grant <subject> <path> <grade>                         Issue a path grant (owner only; grade: discover|read|write|exclusive)
   fs grants                                                 List all path grants in the room
   fs revoke <subject> <path>                                Revoke a previously issued path grant (owner only)
@@ -10874,6 +12020,8 @@ files:
   fs config <open|closed>                                   Set the room's default_access posture (owner only)
   fs deps <path>                                            Walk a file's import closure; flag deps you can't read
   fs request <path> [--grade read]                          Post an advisory access request for a path
+  fs status [<prefix>] [--deep] [--porcelain] [--root <dir>]  Awareness: per-file sync state vs the room (= in-sync ↑ ahead ↓ behind ⇅ diverged C markers \uD83D\uDD12 locked ? untracked ✝ room-deleted); --deep dry-runs a merge on diverged files; read-only, exit 0 always
+  fs diff <path> [--base] [--root <dir>]                    Unified diff of your local copy against the room tip (no local writes); --base adds a 3-way base↔mine/base↔tip summary
 
 agent:
   state                                                     Show claims table + roster
@@ -11075,6 +12223,7 @@ main().catch((err2) => {
 export {
   wantsVersion,
   wantsHelp,
+  statusScan,
   resolveFetchRef,
   resolveDeliverMode,
   localSizes,

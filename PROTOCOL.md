@@ -142,6 +142,13 @@ grade lattice `discover < read < write < exclusive`; a room-global posture
 r+w, `closed` = deny-until-granted. (v1 honesty: `read` gates path *discovery*, not raw-blob
 confidentiality — see TODOS.)
 
+**(5) Staying in sync is a client-side awareness problem, not a new wire mechanism**
+(informative; no new performatives). `fs status` / `fs diff` classify each local file
+against its last-synced base and the room tip (in-sync / ahead / behind / diverged);
+`fs put` / `fs get` act on that classification and never silently drop a conflict — code
+lands local markers, prose/binary fork `name (N)` — signaled until resolved. Full state
+table and lane rules: CONTEXT §18.
+
 ### 0.f Authority planes — roles, decisions, identity
 
 These exist so that *who may do what* is itself a verifiable log fact, not a config file:

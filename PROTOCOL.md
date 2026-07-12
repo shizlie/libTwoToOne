@@ -1,11 +1,30 @@
-# PROTOCOL.md — Mesh Room Protocol (wire v1 · spec rev v1.6)
+# PROTOCOL.md — Mesh Room Protocol (wire v1 · spec rev v1.7)
 
 > Wire-level contract between the room (L1) and listener daemons (L3).
 > Companion: ARCHITECTURE.md (layers), VISION.md (mission, verifiable-records constraint).
-> Status: **AMENDED v1.6 — 2026-07-06** (Intent I briefing plane: `room_brief` MCP tool (§11) + well-known charter paths (§13) — informative only, no wire/state-machine change — see Changelog). Previously AMENDED v1.5 — 2026-07-06 (Intent H decision plane: `decide.request`/`decide.resolve`/`system.decision_lapse` — see Changelog). The v1 freeze was deliberately re-opened; additive-only resumes from the v1.1 baseline (§10).
+> Status: **AMENDED v1.7 — 2026-07-11** (Intents K/L/M — authority truth, signal ownership,
+> derived attention — see Changelog). Previously AMENDED v1.6 — 2026-07-06 (Intent I briefing
+> plane: `room_brief` MCP tool (§11) + well-known charter paths (§13) — informative only, no
+> wire/state-machine change — see Changelog). Previously AMENDED v1.5 — 2026-07-06 (Intent H
+> decision plane: `decide.request`/`decide.resolve`/`system.decision_lapse` — see Changelog).
+> The v1 freeze was deliberately re-opened; additive-only resumes from the v1.1 baseline
+> (§10).
 
 ## Changelog
 
+- **v1.7 (2026-07-11)** — Intents K/L/M (authority truth · signal ownership · derived
+  attention) amendment: `system.config` gains `authority_source: "card"|"bindings"`
+  (verdict-resolution posture, genesis default `"bindings"` for new rooms, §3/§4/§12.17)
+  and `default_access` splits into `{discover, write}` (legacy string still accepted,
+  normalized on read, §0.e/§3); new room-authored `system.role_lapse` (time-boxed role
+  binding lapse announce, §3); new participant-authorable `escalate.ack` + the durable
+  `escalations[]` projection (§3, `GET /state`); `escalate` gains `data.to` (room-authored
+  routing target, advisory only, §3); `claim` rows gain `rejected_holder`/`reject_seq`
+  (§4/§8) and `max_claim_until` (stalled-bucket derivation, §5); watch `EntryPredicate`
+  gains `task_ref` (§6); `GET /state` grows `bindings[]` (the same resolved view `GET
+  /roles` serves, so every attention/duty/badge consumer reads authority from ONE field,
+  never `roster.roles`) alongside `escalations[]` (§8); new conformance items §12.17
+  (S-K1/S-K2 verdict authority posture) and §12.18 (S-L1 poison timer isolation).
 - **v1.6 (2026-07-06)** — Intent I (briefing plane) amendment: new `room_brief` MCP tool (§11, no wire/state-machine change — a read composition over existing `/state` + `/roles` + file-plane reads, like `room_roster`/`room_roles`); new §13 "Well-known paths" documenting `charter/room.md`/`charter/roles/<role>.md` as ordinary, informative (never normative) file-plane paths, with role names percent-encoded (never a lossy collapse) into a legal path segment — no new performative, no new validation, no append-gate special-casing; new conformance item (§12.16): a charter asserting authority grants none — an accept from a non-verdict-holder is rejected exactly as before, whatever the charter says (R-I2).
 - **v1.5 (2026-07-06)** — Intent H (decisions that don't block) amendment: new participant-authored `decide.request`/`decide.resolve` performative pair (`data:{question, authority:["id:.."|"role:.."], deadline?, fallback_note?, refs?}` / `data:{resolution}`); `authority` is an ordered settler list, arm 0 exclusive until `deadline`, every arm valid after; settler authorization queries `role_bindings` (Intent G) fresh on every resolve attempt, never `roster.roles`; CAS accepts resolve from `open` OR `lapsed` status, rejecting only an already-`resolved` decision (a lapsed decision remains answerable by its authority); new room-only fact `system.decision_lapse` (deadline lapse ⇒ announce, never execute — the room's only decision-related authorship); new top-leve…
 
@@ -138,9 +157,15 @@ sharp edge: nothing enforces a schema, so undisciplined writers pollute the tree
 
 **(4) Access is one primitive: a signed path-capability** (§3 `system.grant`, §8 `/grants`). A
 grade lattice `discover < read < write < exclusive`; a room-global posture
-`default_access ∈ {open, closed}`; role- or id-scoped grants. Today `open` = members get full
-r+w, `closed` = deny-until-granted. (v1 honesty: `read` gates path *discovery*, not raw-blob
-confidentiality — see TODOS.)
+`default_access: {discover: "open"|"closed", write: "open"|"closed"}` (Intent K S-K5/S-K6;
+split so a room can stay discoverable while closing writes); role- or id-scoped grants add on
+top. `discover`/`read` fall back to `default_access.discover`, `write`/`exclusive` fall back to
+`default_access.write` (`read` is not independently split — it piggybacks on `discover`, v1
+honesty: gates path *discovery*, not raw-blob confidentiality — see TODOS). Genesis for a NEW
+room writes `{discover:"open", write:"closed"}` (writes are granted, not assumed); a
+pre-existing room's legacy single-string `default_access` (or its absence) is normalized to
+both grades open — byte-for-byte unchanged until the owner opts in via `system.config`. The
+owner is exempt from `default_access`/grants entirely (short-circuits `authorizePath`).
 
 **(5) Staying in sync is a client-side awareness problem, not a new wire mechanism**
 (informative; no new performatives). `fs status` / `fs diff` classify each local file
@@ -157,7 +182,17 @@ These exist so that *who may do what* is itself a verifiable log fact, not a con
   depth, optional time-box, and override (§3). Crucially this is a **room primitive, not a
   file-plane one** — the fs ACL reads it, but so do the decision plane and `room_brief`. A
   *card* role is only a self-claimed label ("specialty") with no authority; a *binding*
-  confers it (§2/§12).
+  confers it (§2/§12). A time-boxed binding's lapse only *announces* (`system.role_lapse`,
+  Intent K S-K4), it never mutates the binding — the read-time window filter
+  (`listRolesForParticipant`) remains the sole enforcement, so a lost or delayed
+  announcement can never create or extend an authority hole.
+- **Verdict authority posture (Intent K, `system.config.authority_source`).** `accept`/
+  `reject` resolve `verdict_by` role refs against either the sender's self-declared
+  `card.roles` (`authority_source` absent or `"card"` — pre-existing byte-for-byte
+  behavior) or the room-managed `role_bindings` (`authority_source: "bindings"`, the
+  genesis default for every NEW room, S-K1/S-K2). A self-declared card role is never
+  authority under `"bindings"` posture — only an owner-issued `system.role` binding is
+  (§4, §12).
 - **Decisions (Intent H, `decide.request`/`decide.resolve`).** A question of record with an
   ordered `authority` settler list; the first valid settler wins by CAS; a deadline lapse only
   *announces* (`system.decision_lapse`), it never auto-executes a fallback (§3). Work need not
@@ -327,16 +362,18 @@ Unknown performatives are **rejected** (`invalid_performative`), not ignored.
 | `claim`    | any | required | CAS; valid only from `ANNOUNCED` |
 | `release`  | holder, room, or **owner** | required | valid only from `CLAIMED`; owner-initiated is a force-release → ANNOUNCED (D5) |
 | `accept`   | verdict-holder (§4) | required | valid only from `DELIVERED`; terminal |
-| `reject`   | verdict-holder (§4) | required | valid only from `DELIVERED`; `body` must state reason |
-| `escalate` | **room only** | required | `data.reason`: `unclaimed_timeout` \| `lease_expired` \| `stalled` (`contested` reserved for v2); may carry `{last_condition, last_condition_seq}` from the holder's roster fold (Intent F, omitted if the holder never signalled) |
-| `signal`   | any | — | data: `{condition:"working"\|"stuck"\|"gone"}`; liveness condition transition (Intent F); **never causes a task transition and never renews a lease**; roster folds `condition`/`condition_seq` (claim-gated at read: reported only while the sender holds a CLAIMED task); publish transitions only |
+| `reject`   | verdict-holder (§4) | required | valid only from `DELIVERED`; `body` must state reason; returns the row to `ANNOUNCED` (claimable by anyone, unchanged) — the claim table additionally retains `rejected_holder`/`reject_seq` (most-recent rejection; never cleared on re-claim, overwritten by the next reject) as observability bookkeeping surfaced on `GET /state` (Intent L S-L3; enables future reputation folds; NO state-machine change) |
+| `escalate` | **room only** (†`timer_failed` escalates omit `task_ref`) | required† | `data.reason`: `unclaimed_timeout` \| `lease_expired` \| `stalled` \| `timer_failed` (`contested` reserved for v2); may carry `{last_condition, last_condition_seq}` (Intent F); **room-authored escalates carry `data.to: string[]`** — the room-authored default target (`[owner, ...verdict_by]` deduped for task escalates; `[owner]` for task-less `timer_failed`). `data.to` is advisory routing ONLY: a daemon MAY use it as one signal among many (mentions, watches, derived interest) for wake selection — the room stays neutral (Intent C). Every escalate entry also folds an OPEN row into the `escalations` projection (Intent L, below) |
+| `signal`   | any | — | data: `{condition:"working"\|"stuck"\|"gone"}`; liveness condition transition (Intent F); **never causes a task transition and never renews a lease**; roster folds `condition`/`condition_seq`/`condition_ts` (claim-gated at read: reported only while the sender holds a CLAIMED task); `condition_ts` (T11/T12, Intent L S-L7) is the folded entry's wall-clock — additive, render-side staleness only, the room itself never judges freshness; publish transitions only |
 | `key.rotate` | the id itself only (enforced by the reveal check, not sender namespace) | — | data: `{reveal_pubkey?:string, next_commitment?:"sha256:<64-hex>", tombstone?:true}`; participant-authored, signed by the CURRENT key; reveals the pre-committed next key and commits a new one (or `tombstone:true` to retire, same reveal discipline — no privileged shortcut); bootstrap (no prior commitment) omits `reveal_pubkey`; rejects `task_ref` (identity-scoped, not task-scoped) |
 | `decide.request` | any | optional | data: `{question, authority:["id:<pid>"\|"role:<name>"], deadline?, fallback_note?, refs?}`; `thread` is REQUIRED and is the decision's own identity (not `task_ref`); creates a decisions-table row (`409 decision_exists` on reuse) |
 | `decide.resolve` | any | optional | data: `{resolution}`; `thread` REQUIRED, must name an existing open/lapsed decision; CAS — first valid settler wins (`403 not_authorized_settler`, `404 unknown_decision`, `409 invalid_transition`) |
+| `escalate.ack` | any | — | data: `{escalate_seq: number}` naming an existing escalate entry's seq; CAS — the projection row must exist (`404 unknown_escalation`) and be open (`409 already_acked`); fold flips it `{status:"acked", acked_by: sender, ack_seq}`. ANY member may ack — acking is claiming responsibility, attributed and visible in the record; duplicate escalates for one incident each get their own row and are independently ackable (at-least-once signals; consumer-level dedup is a reader concern). The `escalations` projection (`escalate_seq` = the ORIGINAL entry's seq, PRIMARY KEY) is the durable record surfaced in `GET /state` — a future log compaction cannot orphan an ack (Intent L, S-L5) |
 | `system.*` | **room only** | — | `system.genesis`, `system.join`, `system.leave`, `system.roles` |
 | `system.grant` | **room only** | — | data: `{path_prefix, subject, access:"discover"\|"read"\|"write"\|"exclusive"}`; `subject` is a `participant_id` or `role:<name>` ref; owner-initiated via `POST /grants`; grants path-capability at the given access grade |
 | `system.role` | **room only** | — | data: `{participant, role, replaces?, depth?, active_from?, active_until?, override?}`; owner-initiated via `POST /roles`; binds a participant to a named role (bench `depth`, optional time-box `active_from`/`active_until` epoch ms, optional `override`); `replaces` swaps a role in ONE entry — binds the incoming holder and unbinds the outgoing holder in the same append (Intent G S-G1); a lapsed time-box excludes the binding from ACL resolution (`authorizePath`) but the row stays visible in `GET /roles`/`GET /v1/rooms/:room/state` reads; `active_from`/`active_until` must be finite numbers if provided — non-finite values (e.g. `Infinity` from JSON `1e400`, `NaN`) are rejected `400 invalid_submission` rather than silently stored as unbounded; card role is a label only (`specialties` in newer cards) and is NOT consulted in authz |
-| `system.config` | **room only** | — | data: `{default_access?:"open"\|"closed", rate_limit?:string}` (at least one field required); owner-initiated via `POST /config`; sets the room's default-access posture (open = membership implies full access; closed = explicit grants required — flip is immediate, see R-E8) and/or the room's per-participant `rate_limit` (§7); a live `rate_limit` update re-seeds the DO's `RateLimiter` on the next append (in-flight token buckets reset — intended, so a raise takes effect at once, not after the old window drains); `rate_limit` must parse as `"<rate>/min[;burst=<n>]"` and satisfy the §7 bounds, else `400 invalid_submission` (same code as genesis `defaults.rate_limit`, distinct message per failure mode) |
+| `system.role_lapse` | **room only** | — | data: `{participant, role, active_until}`; room-authored when a time-boxed `system.role` binding's `active_until` passes — either via the alarm-driven `role:<participant>:<role>` timer for a window still in the future at bind time (scheduled/rescheduled/cancelled by the sequencer's `system.role`/`system.revoke` projections; both id components are percent-encoded injectively, since a role name MAY itself contain ':', so two distinct `(participant, role)` tuples can never collide onto the same timer id), OR synchronously at the `POST /roles` route when the bound window's `active_until` is already `<= now` at bind time (a born-lapsed bind — nothing left to wait for, so no timer is ever scheduled for it; applies to a fresh bind and to a re-bind of a currently-active binding into a past window alike); both paths share ONE dedupe guard (re-checks the live binding still matches the tuple and that no `system.role_lapse` entry already exists for it) so a timer-fired and a bind-time announce for the same tuple can never double-fire (Intent K S-K4); announce-only — neither path ever touches `role_bindings`; enforcement remains the read-time window filter (`listRolesForParticipant`), so a lost or delayed announcement can never create or extend an authority hole |
+| `system.config` | **room only** | — | data: `{default_access?:"open"\|"closed"\|{discover,write}, rate_limit?:string, authority_source?:"card"\|"bindings"}` (at least one field required); owner-initiated via `POST /config`; `default_access` sets the room's write/discover posture — a legacy single string is normalized to both grades on read (S-K5 wire compat: an old CLI posting the legacy string is never rejected — flip is immediate, see R-E8); `authority_source` sets the verdict-resolution posture (`card` = self-declared `card.roles`, `bindings` = owner-managed `role_bindings`, S-K1/S-K2) and/or the room's per-participant `rate_limit` (§7); a live `rate_limit` update re-seeds the DO's `RateLimiter` on the next append (in-flight token buckets reset — intended, so a raise takes effect at once, not after the old window drains); `rate_limit` must parse as `"<rate>/min[;burst=<n>]"` and satisfy the §7 bounds, else `400 invalid_submission` (same code as genesis `defaults.rate_limit`, distinct message per failure mode) |
 | `system.lease_clear` | **room only** | — | data: `{path, holder, reason:"lease_expired"}`; room-authored on file-lease expiry (mirrors `escalate(lease_expired)` for the task plane); sequencer projection clears `file_lease` row + cancels the `filelease:<path>` timer — told-not-polled, no silent delete |
 | `system.revoke` | **room only** | — | data: exactly one of `{grant:{path_prefix, subject}}` \| `{role:{participant, role}}` (both/neither → `invalid_submission`); owner-initiated via `POST /grants/revoke` or `POST /roles/revoke`; sequencer pre-append CAS rejects a target that no longer exists (`unknown_grant`/`unknown_role`, surfaced as 404); projection deletes the matching `grants`/`role_bindings` row |
 | `system.decision_lapse` | **room only** | — | data: `{decision_id}`; `thread` REQUIRED (== `decision_id`); room-authored on decision deadline expiry (mirrors `escalate`/`system.lease_clear`'s timer-fired shape); sequencer projection flips `decisions.status` open→lapsed — idempotent, never executes a fallback |
@@ -370,8 +407,12 @@ Rules:
   `deliver` requires sender == holder and `artifacts` ≥ 1 (`missing_artifacts` otherwise).
   `inform` never transitions — progress updates with links are safe chatter by construction.
 - **Verdict authority**: `verdict_by` from the announce, default = announcer. Role refs
-  (e.g. `reviewer:backend`) match any roster member holding the role at verdict time.
-  Others → `not_authorized_verdict`.
+  (e.g. `reviewer:backend`) resolve against `card.roles` (`authority_source` absent or
+  `"card"`, pre-existing byte-for-byte behavior) or the room-managed `role_bindings`
+  (`authority_source: "bindings"`, the genesis default for new rooms) — never both; a
+  self-declared card role is never authority under `"bindings"` posture, even if it names
+  the same role string as a real binding (Intent K S-K1/S-K2, §0.f, §12.17). Others →
+  `not_authorized_verdict`, detail names the remedy under `"bindings"` posture.
 - **Reject** returns the task to ANNOUNCED (re-claimable by anyone, including the
   previous holder). DONE is terminal; further task entries → `invalid_transition`.
 - **depends_on**: informational in v1 (drives watches §6); the relay does NOT block
@@ -403,7 +444,7 @@ Rules:
 { "id": "w-12", "owner": "agentA@team-fe",
   "predicate":
     { "kind": "task_state", "task_ref": "b-backend", "to": "DONE" }
-    // or { "kind": "entry", "performative?": "...", "path?": "...", "participant?": "...", "thread?": "...", "mention_me?": true }
+    // or { "kind": "entry", "performative?": "...", "path?": "...", "participant?": "...", "task_ref?": "...", "thread?": "...", "mention_me?": true }
 }
 ```
 
@@ -416,6 +457,12 @@ Rules:
   participant is intrinsically its sender, never a `data` field. Absent fields impose no
   constraint; a performative outside its arm's list never matches even if it happens to
   carry a same-shaped field (no false wake).
+- `task_ref` targeting (optional, entry-kind only, Task 8 / Intent L): matches ANY
+  performative by exact `submission.task_ref` equality — e.g. `{performative:"escalate",
+  task_ref:"b-1"}` scopes a watch to one task's escalations, never firing for a task-less
+  `escalate(timer_failed)` or a different task's `escalate`. Same AND fall-through as
+  `path`/`participant`: absent imposes no constraint; present and no `task_ref` on the
+  entry never matches.
 - Evaluated at append time. Matches produce **notify** events targeted at the owner.
 - Registration is idempotent on `(owner, predicate)`: re-POSTing an identical predicate
   returns the existing watch id (daemons re-register their config at every startup).
@@ -454,8 +501,8 @@ Auth: `Authorization: Bearer <participant_token>` on everything except `/join` a
 | `POST /v1/rooms/:room/entries` | body: Submission → `202 {seq, entry_hash}` or §9 error. The room validates sig, nonce, performative rules, state machine, rate limit — then appends. |
 | `GET /v1/rooms/:room/entries?since=&limit=&wait_s=` | entries after `seq=since` (≤ limit, default 100). `wait_s` ≤ 55 long-polls until data or timeout → `{entries[], notifies[], head}` |
 | `WS /v1/rooms/:room/stream?since=` | replays from `since`, then live frames (§6). Auth: `Authorization` header, or `?token=` for clients that cannot set WS headers |
-| `GET /v1/rooms/:room/state` | `{head: {seq, entry_hash}, claims[], roster[], decisions[], defaults}` — each `roster[]` row carries `condition`/`condition_seq` (Intent F): `condition` reads `null` unless the participant currently holds a CLAIMED task (claim-gated, S-F6), `condition_seq` is unconditional; each `decisions[]` row (Intent H, v1.13.0) carries `id, question, refs, authority, deadline, fallback_note, status, resolution, resolved_by, resolved_via, request_seq, resolved_seq, lapsed_seq, task_ref` plus, only while `status === "open"`, an `authority_holders` map resolving each `role:` arm to its current time-boxed holder(s) (R-G1) — a CLI display aid, never itself an authorization check |
-| `GET /v1/rooms/:room/roles` | membership-gated → `{roles: [{participant, role, depth, active_from, active_until, in_window, override, condition, condition_seq}]}` — the resolution view: every binding for every role, sorted per-role (an active `override` first, else ascending `depth`); lapsed/`gone` rows are shown, never dropped or promoted (Intent G S-G3); `condition` read ungated (unlike `/state`'s claim-gated read, S-F6) |
+| `GET /v1/rooms/:room/state` | `{head: {seq, entry_hash}, claims[], roster[], decisions[], escalations[], bindings[], defaults}` — `escalations[]` (Intent L, T6/7): the durable open/acked projection (see `escalate.ack` §3); `bindings[]` (Intent M, T13a): the SAME resolved role-binding rows `GET /roles` serves (`{participant, role, active_from, active_until, in_window}`), duplicated onto the daemon's one standing poll so every attention/duty/badge consumer reads authority from bindings — NEVER the roster's join-time card cohort (`roster.roles`; the audit §1.1 rule) — each `roster[]` row carries `condition`/`condition_seq`/`condition_ts` (Intent F; `condition_ts` additive, T11/T12): `condition` and `condition_ts` read `null` unless the participant currently holds a CLAIMED task (claim-gated, S-F6 — `condition_ts` mirrors `condition`'s gate exactly, an ISO8601 timestamp when present); `condition_seq` is unconditional (always reflects the stored fold, gate or no gate); the room never judges `condition_ts` stale, only threads it — staleness is a view-side annotation (T12); each `decisions[]` row (Intent H, v1.13.0) carries `id, question, refs, authority, deadline, fallback_note, status, resolution, resolved_by, resolved_via, request_seq, resolved_seq, lapsed_seq, task_ref` plus, only while `status === "open"`, an `authority_holders` map resolving each `role:` arm to its current time-boxed holder(s) (R-G1) — a CLI display aid, never itself an authorization check |
+| `GET /v1/rooms/:room/roles` | membership-gated → `{roles: [{participant, role, depth, active_from, active_until, in_window, override, condition, condition_seq, condition_ts}]}` — the resolution view: every binding for every role, sorted per-role (an active `override` first, else ascending `depth`); lapsed/`gone` rows are shown, never dropped or promoted (Intent G S-G3); `condition`/`condition_seq`/`condition_ts` read ungated (unlike `/state`'s claim-gated read, S-F6) |
 | `POST /v1/rooms/:room/claims/:task_ref/heartbeat` | holder only → `{lease_expires}` |
 | `POST /v1/rooms/:room/leases/heartbeat` | body: `{path}`; holder only → `{lease_expires}`; renews an exclusive file lease (mirrors task heartbeat above, W2) |
 | `POST /v1/rooms/:room/invites` | owner only; body: `{participant_id, passphrase, ttl_s?}` (passphrase ≥ 4 chars) → `201 {participant_id, expires}`. Registers a single-use passphrase invite (§2); re-POST for the same id replaces it and resets its attempt counter; pending invites capped at 64 |
@@ -569,6 +616,19 @@ That is the failure-detection design (D11/F4), not an oversight.
     names but who holds no actual verdict/grant/settler authority is rejected exactly as
     before — charter content is never parsed, matched, or consulted by any authorization
     check (R-I2).
+17. **Verdict authority posture (S-K1/S-K2, Intent K):** a NEW room (genesis
+    `authority_source: "bindings"`) refuses an `accept`/`reject` from a participant whose
+    only claim to `verdict_by` is a self-declared `card.roles` entry — `403
+    not_authorized_verdict`; the same verdict succeeds once the owner explicitly binds
+    that role via `system.role`, and fails again once the owner `system.revoke`s it
+    (revoke-then-verdict, single-threaded DO serialization — R-K1). A pre-existing room
+    (`authority_source` absent/`"card"`) keeps today's card-role behavior byte-for-byte
+    until the owner opts in via `system.config`.
+18. **Poison timer isolation (S-L1, Intent L):** of N deadline entries due together, one
+    whose payload fails to parse never reaches `processTimer` — it is deleted immediately
+    and surfaces its own `escalate(timer_failed, reason:"malformed_payload", timer_id)`;
+    the other N−1 fire normally; no rows remain once the batch clears; the alarm still
+    re-arms behind a poison entry (a later timer due after it still fires on schedule).
 
 ## 13. Well-known paths (file-plane; informative, not normative)
 

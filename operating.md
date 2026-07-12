@@ -83,6 +83,90 @@ guesses), and **short-lived** (default TTL 1 h, `--ttl <seconds>`, capped at 7 d
 TOFU still applies: if the id is already bound to a different pubkey, the join fails
 `id_taken` and the invite is not consumed.
 
+### Authority posture (verdict authority: `authority_source`)
+
+**What changed.** Before this release, `accept`/`reject` verdict authority resolved
+`verdict_by` role membership from the sender's **self-declared card roles**
+(`roster.roles`, set at join time and never re-checked) — the same self-declared field a
+token-invited joiner controls. A joiner could put `roles:["reviewer:backend"]` on their
+own card and pass verdicts on any task whose `verdict_by` names that role, with no owner
+action. This is a security hole: card roles are self-declared, descriptive self-branding,
+never an authority grant — `decide.resolve` and file-plane ACLs
+already resolved authority from the owner-managed, time-boxed `role_bindings` table;
+verdicts did not.
+
+**The fix.** A room-level posture flag, `authority_source: "card" | "bindings"`, gates
+which source `accept`/`reject` reads. Under `"bindings"`, verdict authority requires an
+owner-issued binding (`mesh fs role <participant> <role>`) — a self-declared card role no
+longer confers verdict power. Every room created from this release on is `"bindings"` by
+default (secure by default, no opt-in required). A room created before this release has
+no `authority_source` field in its defaults blob; absence resolves to `"card"` — **your
+existing room keeps today's behavior until you explicitly upgrade it.**
+
+**Upgrade an existing room:**
+
+```sh
+mesh fs config authority-source bindings
+```
+
+(owner only; live effect — the very next `accept`/`reject` is checked against
+`role_bindings`). Bind every current verdict-holder BEFORE flipping the posture, or their
+next verdict will 403 with a remedy pointing at `mesh fs role`:
+
+```sh
+mesh fs role <participant> <role>       # once per verdict-holder, before the flip
+mesh fs config authority-source bindings
+```
+
+`mesh brief` prepends a one-line warning for the room owner while the room is still on
+`"card"` posture, so the migration is discoverable in-room rather than something you have
+to remember from a changelog.
+
+**Retire → force-release.** Flipping authority posture does not, by itself, touch any
+in-flight claim or lease. If a participant is retired (or simply goes away) while holding
+a claim, its lease and any `max_claim_until` cap still lapse on their normal TTLs — that
+enforcement is unrelated to `authority_source` and unaffected by it. The owner does not
+have to wait out the TTL: `POST /v1/rooms/:room/claims/:task_ref/force-release`
+(owner-only) releases the claim immediately, same as the TTL lapse (holder cleared, state
+back to `ANNOUNCED`, anyone may re-claim).
+
+**Write posture (`default_access`, S-K5/S-K6).** `default_access` splits the same way:
+`{discover, write}`, each independently `"open"` or `"closed"`. `discover` gates
+tree/discovery visibility; `write` gates `file.write`/`file.delete`/`file.lock`. Every
+room created from this release on gets `{discover:"open", write:"closed"}` — discovery
+stays open, but writes must be granted, not assumed (mirrors the authority-posture
+secure-by-default: no opt-in, no config step required for a fresh room to be safe). A
+room created before this release keeps its single legacy `default_access` string
+(`"open"`/`"closed"`, or absent ⇒ `"open"`); it is read as **both** grades set to that
+value — byte-for-byte unchanged until the owner explicitly reconfigures it.
+
+**Open writes for members** (undo the new-room default, or restore legacy-open
+behavior on a room you just upgraded):
+
+```sh
+mesh fs config write open       # everyone may write; discovery untouched
+mesh fs config discover open    # everyone may discover the tree; write untouched
+mesh fs config open             # legacy alias: sets BOTH grades to "open"
+mesh fs config closed           # legacy alias: sets BOTH grades to "closed"
+```
+
+`mesh fs config write <open|closed>` and `mesh fs config discover <open|closed>` set one
+grade independently; the bare `mesh fs config <open|closed>` form still works as a legacy
+alias that sets both. A closed-write `file.write`/`file.delete`/`file.lock` from a
+participant with no covering grant 403s `not_authorized_path` with a remedy naming
+`mesh fs request --grade write <path>`.
+
+Note: the single-grade forms are a client-side read-modify-write (the wire contract
+deliberately rejects partial objects — no silent merge), so two concurrent
+`fs config write`/`fs config discover` invocations can last-write-win over each other's
+OTHER grade. Room state itself stays consistent (single-threaded sequencer); just avoid
+racing posture changes from two terminals.
+
+**Demo note:** any script that has a non-owner member write to the room (e.g. the
+onboarding walkthroughs in this repo's `README.md`/`mesh/scripts/*-demo.sh`) needs one
+`mesh fs config write open` (or an explicit `mesh fs grant <member> <prefix> write`) step
+right after room creation — a fresh room's write posture is closed by default.
+
 ### Storage ceiling and compaction
 
 v1 uses the DO SQLite store for the append-only log, claim table, roster, and timer queue.
@@ -126,6 +210,20 @@ The file plane turns a room into a live shared folder: agents post `file.write` 
 
 File content reuses the existing R2 artifact store (`r2:<sha256>`); the tree entry
 records `{path, content_hash, size, tip_seq}` only — bytes are fetched per-file on demand.
+
+**Mesh vs. a git worktree.** These solve different problems and are not substitutes.
+A worktree *isolates* — each agent gets its own copy, works undisturbed, and merges back
+later; conflicts surface once, at merge time. The file plane *shares* — one mutable
+surface every participant writes to live, accepting collisions as they happen (CRDT merge
+for prose, 3-way `diff3` for code, exclusive locks for anything that can't merge at all).
+**Isolation is git worktree territory; mesh is the shared-truth layer live collaboration
+needs on top of it.** In practice: use a worktree (or your own branch/clone) when you want
+to work heads-down without stepping on anyone; use the mesh file plane when the point is
+that everyone sees the same tree, in real time, with every edit attributed and ordered.
+The two compose — an agent's workspace root can itself be a worktree checkout that also
+runs `meshl`, syncing that worktree against the room's shared tree — but mesh never
+manages branches, commits, or history; that stays git's job (CONTEXT §"Not a worktree",
+§"The git-zone boundary").
 
 ### `mesh fs` verbs
 
@@ -222,6 +320,14 @@ GET /v1/rooms/:room/tree[?prefix=<path>]
 Requires a valid bearer token (membership-gated). The response covers the entire namespace
 (or a prefix subtree). The tree is KB–MB even for a large repo; content bytes are never
 included — call `mesh fs get` or `GET /v1/rooms/:room/artifacts/<hash>` per file.
+
+**Ambient tree-diff awareness (`WorksetScanner`, Task 15 / Intent M).** The daemon's
+`WorksetScanner` (`daemon/src/workset.ts`) periodically diffs the local workspace against
+the room using this same `/tree` metadata — `behind`/`conflict` counts for the CHECK-tier
+badge (see [Ambient tree-diff scan](#ambient-tree-diff-scan-worksetscanner) under
+[Daemon](#daemon)), computed purely from hashes it already has (the tree's `content_hash`,
+a cached local file hash, and the `fs edit`/`put`/`get` sidecar). It never fetches a blob
+and never writes under the workspace root.
 
 ---
 ## Write policies
@@ -483,6 +589,13 @@ before serving a cached entry for a `cat`/`hydrate` call, the shim checks the tr
 cache is hash-keyed, so a file moved to a new path that keeps the same content reuses the
 cached bytes (cross-path dedup).
 
+**Background prefetch (Task 18):** the daemon also warms this cache proactively — on every
+consumed `file.write` entry under a path the participant can read, it fires a fire-and-forget
+`WorkspaceCache` warm by the entry's `content_hash` (skipping already-warm hashes and files over
+`prefetch.max_bytes`, default 5 MB). This is the one ambient byte-move D-PH3 permits: it only
+ever touches this in-memory cache in `state_dir`, never the working tree, and a failed warm is
+swallowed as a debug log — `prefetch.enabled: false` in `mesh.yml` turns it off entirely.
+
 ### Bulk hydration: `mesh fs hydrate`
 
 For deliberate pre-population (e.g. before running a build):
@@ -646,8 +759,8 @@ MCP polling hints, or both (hybrid).
 
 ### Standing vs. dynamic interests: the unified watch model (W6)
 
-Two independent mechanisms feed the same wake pipeline, and both wake the agent —
-neither is a fallback for the other:
+Three independent mechanisms feed the same wake pipeline, and all of them wake the
+agent — none is a fallback for another:
 
 - **Static (`mesh.yml` `subscriptions.*`)** — standing interests declared once at
   daemon startup: mentions, threads, performative types, roles, and any
@@ -658,6 +771,17 @@ neither is a fallback for the other:
   or auto-registered by the CLI (see below). The room evaluates these server-side and
   pushes a `notify` frame (WS) or a `notifies[]` entry (poll) directly to the owner —
   told, not polled, even for a path the daemon's static config never mentioned.
+- **Derived (zero-config, Intent M / T13)** — a third interest class the daemon computes
+  FOR the agent from what the room already knows about it, refreshed from the duty loop's
+  standing `GET /state` poll each cycle (no new traffic): a `decide.request` naming the
+  agent (by id or by an owner-BOUND role), a `deliver` awaiting the agent's verdict, an
+  `escalate` whose `data.to` targets it, the batched sync-conflict `inform` touching a
+  path it holds a lease/session on, and a `stuck`/`gone` `signal` from a participant one
+  of its held claims `depends_on`. Default ON; opt out with `attention.derived: false` in
+  `mesh.yml`. Staleness bound: one duty cadence (the nudge loop is the backstop). Role
+  authority here comes ONLY from `/state`'s `bindings[]` (owner-issued, in-window) — a
+  self-declared card role never wakes anyone, exactly as it never authorizes anything
+  (see Authority posture above).
 
 A `notify`/`notifies[]` hit bypasses the T0 static filter entirely: an explicit
 room-registered watch on a path or participant IS the subscription, so the daemon
@@ -718,8 +842,15 @@ Optional:
 | `liveness.interval_s` | Liveness tick interval (default `300`; does NOT inherit `heartbeat.interval_s` — S-F2) |
 | `liveness.stuck_after_s` | Append/hook staleness threshold before a held claim reads `stuck` (default `300`) |
 | `liveness.debounce_s` | Minimum gap between published transitions (default `60`) |
+| `consume.failure_threshold` | Consecutive WS/poll consume-pipe failures (T11, Intent L S-L7) before the daemon logs a pipe-dead line and marks itself `degraded` locally — default `3` |
 | `brief.arrival_pointer` | Inject the Intent I arrival pointer at all (first wake / reanchor gap / `poke --brief`) — default `true` |
 | `brief.reanchor_after_s` | Seconds since the last wake before the NEXT wake re-anchors with the pointer instead of its digest — default `3600`; `0` disables |
+| `workspace.root` | Local checkout `WorksetScanner` (Task 15) scans for tree-diff awareness — default `.` (the daemon's cwd at `meshl run` time) |
+| `workset.enabled` | Run the ambient tree-diff scan at all — default `true` |
+| `workset.interval_s` | Seconds between `WorksetScanner` `/tree` scans, see [Ambient tree-diff scan](#ambient-tree-diff-scan-worksetscanner) below — default `15`; floors at `5` |
+| `attention.derived` | Zero-config derived attention (Intent M, Task 13) — wake from what the room already knows about the agent (verdict-due, addressed escalate, held-lease conflict, `depends_on` stuck signal), see [Attention (WAKE) sources](#attention-wake-sources) above — default `true` |
+| `prefetch.enabled` | Background `WorkspaceCache` warming on consumed `file.write` entries (Task 18), see [`WorkspaceCache`](#workspacecache) above — default `true` |
+| `prefetch.max_bytes` | Skip warming files over this size — default `5000000` (5 MB) |
 
 ### Duty reconciler
 
@@ -732,6 +863,21 @@ last poll, injects a digest — e.g. `[mesh] duties — awaiting your verdict (a
 · open to claim: <ref>. Run \`mesh inbox\`/\`mesh state\`, then claim/deliver/accept.` — a pull
 over current room state, robust to any missed or unsubscribed event.
 
+### Ambient tree-diff scan (`WorksetScanner`)
+
+Alongside the duty reconciler, `daemon/src/workset.ts`'s `WorksetScanner` polls `GET /tree`
+every `workset.interval_s` (default `15`s, floors at `5`s — deliberately decoupled from
+`wake.duty_poll_interval_s`) and classifies every room-tracked path against the local
+checkout at `workspace.root` (default: the daemon's cwd) and its `fs edit`/`put`/`get`
+sidecar, via the same `classifySync` `fs status` uses. It computes two ambient counts —
+`behind` (the room moved past an untouched local copy) and `conflict` (an unreconciled
+diverged/never-synced pair) — for the CHECK-tier badge (Task 16) to surface in wake
+digests, duty nudges, `inbox`, and `brief`. IO discipline: a local file is re-hashed only
+when its mtime/size changed since the last scan, and the scan itself never fetches an
+artifact/content endpoint or writes under the workspace root — metadata only (S-M4). A
+room with no local sync history yet (no `edit-base` dir) is skipped cleanly and logged
+once, never as an error loop.
+
 ### Observable liveness (`signal`, Intent F)
 
 While a task is `CLAIMED`, the daemon's `LivenessMonitor` periodically re-runs the same
@@ -743,6 +889,18 @@ unless the participant currently holds a CLAIMED task, even if it published a co
 (claim-gated read, S-F6 — a released participant is never reported stuck). `escalate(stalled)` /
 `escalate(lease_expired)` cite the holder's last published condition when one exists. Subscribe to a
 peer's transitions with `mesh watch entry --participant <id>`.
+
+**Pipe error visibility + honest staleness (T11/T12, Intent L S-L7).** A participant whose
+consume pipe (WS + poll fallback) dies silently must not read as present-and-working forever.
+T11: `Consumer` counts consecutive WS/poll failures per branch and, at
+`consume.failure_threshold`, logs once and marks itself `degraded`; the next success of that
+SAME branch restores `ok` and (when `liveness.publish` is on) republishes a fresh
+`signal(working)` so the roster recovers promptly. But a truly dead pipe can't publish anything
+— that's what T12 covers: the room additionally folds `condition_ts` (the signal entry's
+wall-clock, additive, alongside `condition`/`condition_seq`, same claim-gated read at `/state`)
+and CLI renders (`mesh state`, `mesh fs roles`) annotate a condition older than 3×
+`liveness.stuck_after_s` (900s) as `<condition>? stale <age>` — e.g. `working? stale 22m`. The
+room never judges staleness; only the views do.
 
 **Consent (sovereignty).** `liveness.publish` defaults **ON** — set it to `false` in `mesh.yml` to
 opt a runtime out entirely; the room's derived floor (lease expiry, `escalate(stalled)`,
@@ -1016,6 +1174,30 @@ so exactly one wins and the rest get `claim_conflict`.
 | agent stalls at the folder-trust prompt | the script sends Enter to accept it after launch; if your `claude` build differs, accept it once manually in the pane |
 | daemon detects `busy` unreliably (screen-scraping the pane is fragile) | wire `meshl hooks --runtime claude\|omp --state-dir <dir>` into the agent's idle/busy hooks — the robust wake signal, not a pane-scrape guess |
 | you know there's work but don't want to wait for the next digest | `meshl poke --config <path>` force-injects an inbox hint immediately, bypassing the idle/busy gate |
+
+---
+
+## Health check (`mesh doctor`)
+
+`mesh doctor [--porcelain] [--root <dir>]` (Intent L, S-L6 "any member, in one step,
+obtains the room's open problems") composes ONE read-only pass over everything already
+worth knowing about a room, client-side, over EXISTING endpoints — no new room route.
+It checks: open escalations (with a `mesh ack <seq>` hint), stalled holds (any claim
+`CLAIMED` past its `max_claim_until` — a steward view, not just your own holds), lapsed
+decisions and open decisions past their deadline, roster conditions that are stale (the
+T12 rule) or `gone`, local workspace conflicts (`fs status`'s `diverged` rows and its
+porcelain "C" conflict-markers family — drift like `behind`/`ahead` is not a conflict),
+the room's hash chain (`GET /verify`), and the R2 artifacts of the 10 most-recently
+delivered claims (a `HEAD` per `r2:` hash — missing ones get a re-deliver hint).
+
+Every check degrades independently: a network blip on `verify`, a discover-gated `/tree`,
+an unreachable `/entries` page, or one flaky artifact `HEAD` each turn into a `⚠ ...:
+skipped (<reason>)` line instead of failing the command — `doctor` always finishes and
+reports what it *could* verify. The one hard-fail path is `/state` itself: no state, no
+report, exit 2. Otherwise: **exit 0** clean, **exit 1** problems found (same D5 contract
+`fs put`/`fs get` use). `--porcelain` prints one stable `KIND\tref\tdetail` line per
+problem — nothing on a clean room — for scripting; the default view groups rows under a
+titled block per non-empty category.
 
 ---
 

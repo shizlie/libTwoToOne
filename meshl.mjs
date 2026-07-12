@@ -13581,9 +13581,9 @@ var require_dist = __commonJS((exports, module) => {
 });
 
 // src/main.ts
-import { readFileSync as readFileSync6, existsSync as existsSync5, statSync as statSync3 } from "node:fs";
-import { mkdirSync as mkdirSync3, openSync, writeFileSync as writeFileSync4, rmSync as rmSync2, realpathSync as realpathSync2 } from "node:fs";
-import { join as join5, resolve as resolve2 } from "node:path";
+import { readFileSync as readFileSync8, existsSync as existsSync7, statSync as statSync4 } from "node:fs";
+import { mkdirSync as mkdirSync4, openSync, writeFileSync as writeFileSync5, rmSync as rmSync3, realpathSync as realpathSync2 } from "node:fs";
+import { join as join7, resolve as resolve2 } from "node:path";
 import { homedir as homedir2 } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -13717,6 +13717,8 @@ function parseWatch(raw, idx) {
         entry.path = w["path"];
       if (typeof w["participant"] === "string")
         entry.participant = w["participant"];
+      if (typeof w["task_ref"] === "string")
+        entry.task_ref = w["task_ref"];
       return entry;
     }
     default:
@@ -13897,9 +13899,74 @@ function validateConfig(raw) {
       brief.arrival_pointer = rb["arrival_pointer"];
     }
   }
+  const consume = { failure_threshold: 3 };
+  if (r["consume"] !== undefined) {
+    if (!isObj(r["consume"]))
+      throw new ConfigError("consume must be a mapping");
+    const rc = r["consume"];
+    if (rc["failure_threshold"] !== undefined) {
+      if (typeof rc["failure_threshold"] !== "number" || !(rc["failure_threshold"] > 0))
+        throw new ConfigError("consume.failure_threshold must be a positive number");
+      consume.failure_threshold = rc["failure_threshold"];
+    }
+  }
+  const attention = { derived: true };
+  if (r["attention"] !== undefined) {
+    if (!isObj(r["attention"]))
+      throw new ConfigError("attention must be a mapping");
+    const ra = r["attention"];
+    if (ra["derived"] !== undefined) {
+      if (typeof ra["derived"] !== "boolean")
+        throw new ConfigError("attention.derived must be a boolean");
+      attention.derived = ra["derived"];
+    }
+  }
+  const workspace = { root: "." };
+  if (r["workspace"] !== undefined) {
+    if (!isObj(r["workspace"]))
+      throw new ConfigError("workspace must be a mapping");
+    const rw = r["workspace"];
+    if (rw["root"] !== undefined) {
+      if (typeof rw["root"] !== "string")
+        throw new ConfigError("workspace.root must be a string");
+      workspace.root = rw["root"];
+    }
+  }
+  const workset = { enabled: true, interval_s: 15 };
+  if (r["workset"] !== undefined) {
+    if (!isObj(r["workset"]))
+      throw new ConfigError("workset must be a mapping");
+    const rws = r["workset"];
+    if (rws["enabled"] !== undefined) {
+      if (typeof rws["enabled"] !== "boolean")
+        throw new ConfigError("workset.enabled must be a boolean");
+      workset.enabled = rws["enabled"];
+    }
+    if (rws["interval_s"] !== undefined) {
+      if (typeof rws["interval_s"] !== "number" || !(rws["interval_s"] >= 5))
+        throw new ConfigError("workset.interval_s must be a number >= 5 (documented floor)");
+      workset.interval_s = rws["interval_s"];
+    }
+  }
+  const prefetch = { enabled: true, max_bytes: 5000000 };
+  if (r["prefetch"] !== undefined) {
+    if (!isObj(r["prefetch"]))
+      throw new ConfigError("prefetch must be a mapping");
+    const rpf = r["prefetch"];
+    if (rpf["enabled"] !== undefined) {
+      if (typeof rpf["enabled"] !== "boolean")
+        throw new ConfigError("prefetch.enabled must be a boolean");
+      prefetch.enabled = rpf["enabled"];
+    }
+    if (rpf["max_bytes"] !== undefined) {
+      if (typeof rpf["max_bytes"] !== "number" || !(rpf["max_bytes"] > 0))
+        throw new ConfigError("prefetch.max_bytes must be a positive number");
+      prefetch.max_bytes = rpf["max_bytes"];
+    }
+  }
   if (typeof r["state_dir"] !== "string")
     throw new ConfigError("state_dir is required (string)");
-  return { identity: identity2, room, subscriptions, gate, wake, heartbeat, liveness, brief, state_dir: r["state_dir"] };
+  return { identity: identity2, room, subscriptions, gate, wake, heartbeat, liveness, brief, consume, attention, workspace, workset, prefetch, state_dir: r["state_dir"] };
 }
 function loadConfig(path) {
   let text;
@@ -14824,6 +14891,21 @@ function prefixCovers(prefix, path) {
   const base = prefixBase(prefix);
   return path === base || path.startsWith(base + "/");
 }
+function isOpenClosed(v) {
+  return v === "open" || v === "closed";
+}
+function normalizeDefaultAccess(v) {
+  if (isOpenClosed(v))
+    return { discover: v, write: v };
+  if (v !== null && typeof v === "object") {
+    const o = v;
+    return {
+      discover: isOpenClosed(o.discover) ? o.discover : "open",
+      write: isOpenClosed(o.write) ? o.write : "open"
+    };
+  }
+  return { discover: "open", write: "open" };
+}
 
 // ../proto/src/performatives.ts
 var PERFORMATIVE_SET = {
@@ -14854,7 +14936,9 @@ var PERFORMATIVE_SET = {
   "system.revoke": true,
   "decide.request": true,
   "decide.resolve": true,
-  "system.decision_lapse": true
+  "system.decision_lapse": true,
+  "system.role_lapse": true,
+  "escalate.ack": true
 };
 var ROOM_ONLY = {
   escalate: true,
@@ -14867,11 +14951,16 @@ var ROOM_ONLY = {
   "system.config": true,
   "system.lease_clear": true,
   "system.revoke": true,
-  "system.decision_lapse": true
+  "system.decision_lapse": true,
+  "system.role_lapse": true
 };
 var PARTICIPANT_PERFORMATIVES = Object.keys(PERFORMATIVE_SET).filter((p) => !(p in ROOM_ONLY));
 // ../proto/src/machine.ts
 var MAX_DURATION_S = 30 * 24 * 60 * 60;
+// ../proto/src/decisions.ts
+function decisionsAwaitingAuthority(decisions, selfId, roles) {
+  return decisions.filter((d) => d.status === "open" && (d.authority.includes(`id:${selfId}`) || roles.some((r) => d.authority.includes(`role:${r}`))));
+}
 // ../proto/src/ws.ts
 var WS_PING = '{"type":"ping"}';
 // ../proto/src/watch.ts
@@ -14911,6 +15000,9 @@ function matchesWatch(watch, entry) {
     } else if (perf === "signal") {
       if (sub.sender !== watch.participant)
         return false;
+    } else if (perf === "system.role_lapse") {
+      if (data?.["participant"] !== watch.participant)
+        return false;
     } else if (perf === "key.rotate") {
       if (sub.sender !== watch.participant)
         return false;
@@ -14918,6 +15010,8 @@ function matchesWatch(watch, entry) {
       return false;
     }
   }
+  if (watch.task_ref !== undefined && sub.task_ref !== watch.task_ref)
+    return false;
   return true;
 }
 // ../proto/src/charter.ts
@@ -14947,9 +15041,19 @@ function myRoles(bindings, selfId) {
   }
   return roles;
 }
+function isBindingInWindow(active_from, active_until, nowMs) {
+  return (active_from === null || active_from <= nowMs) && (active_until === null || nowMs < active_until);
+}
 // ../proto/src/duties.ts
+function isClaimStalled(c, selfId, nowMs) {
+  if (c.state !== "CLAIMED")
+    return false;
+  if (selfId !== null && c.holder !== selfId)
+    return false;
+  return c.max_claim_until != null && c.max_claim_until <= nowMs;
+}
 var DEP_SATISFIED = new Set(["DELIVERED", "DONE"]);
-function computeDuties(claims, selfId, roles) {
+function computeDuties(claims, selfId, roles, nowMs) {
   const stateByRef = new Map(claims.map((c) => [c.task_ref, c.state]));
   const depsSatisfied = (deps) => deps.every((d) => {
     const st = stateByRef.get(d);
@@ -14959,6 +15063,7 @@ function computeDuties(claims, selfId, roles) {
   const claimable = [];
   const verdict = [];
   const ready = [];
+  const stalled = [];
   for (const c of claims) {
     if (c.state === "ANNOUNCED" && !c.holder && depsSatisfied(c.depends_on)) {
       claimable.push(c.task_ref);
@@ -14967,15 +15072,20 @@ function computeDuties(claims, selfId, roles) {
     } else if (c.state === "CLAIMED" && c.holder === selfId && c.depends_on.length > 0 && depsSatisfied(c.depends_on)) {
       ready.push(c.task_ref);
     }
+    if (isClaimStalled(c, selfId, nowMs)) {
+      stalled.push(c.task_ref);
+    }
   }
-  return { claimable, verdict, ready };
+  return { claimable, verdict, ready, stalled };
 }
 function dutiesSignature(d) {
   const norm = (a) => [...a].sort().join(",");
-  return `c:${norm(d.claimable)}|v:${norm(d.verdict)}|r:${norm(d.ready)}`;
+  return `c:${norm(d.claimable)}|v:${norm(d.verdict)}|r:${norm(d.ready)}|s:${norm(d.stalled)}`;
 }
 function dutyParts(d) {
   const parts = [];
+  if (d.stalled.length)
+    parts.push(`stalled (needs release or a push): ${d.stalled.join(", ")}`);
   if (d.verdict.length)
     parts.push(`awaiting your verdict (accept/reject): ${d.verdict.join(", ")}`);
   if (d.ready.length)
@@ -14990,8 +15100,77 @@ function formatDuties(d) {
     return null;
   return `[mesh] duties — ${parts.join(" · ")}. Run \`mesh inbox\`/\`mesh state\`, then claim/deliver/accept.`;
 }
+// src/derived.ts
+function buildDerivedInterest(state, leases, selfId, nowMs) {
+  const boundRoles = [...new Set(state.bindings.filter((b) => b.participant === selfId && isBindingInWindow(b.active_from, b.active_until, nowMs)).map((b) => b.role))];
+  const verdictRefs = state.claims.filter((c) => c.verdict_by.includes(selfId) || c.verdict_by.some((r) => boundRoles.includes(r))).map((c) => c.task_ref);
+  const byTaskRef = new Map(state.claims.map((c) => [c.task_ref, c]));
+  const dependsOnPeers = new Set;
+  for (const c of state.claims) {
+    if (c.holder !== selfId)
+      continue;
+    for (const dep of c.depends_on) {
+      const holder = byTaskRef.get(dep)?.holder;
+      if (holder !== undefined && holder !== selfId)
+        dependsOnPeers.add(holder);
+    }
+  }
+  const heldLeasePaths = leases.filter((l) => l.holder === selfId).map((l) => l.path);
+  const openDecisionsCount = decisionsAwaitingAuthority(state.decisions ?? [], selfId, boundRoles).length;
+  return { selfId, boundRoles, heldLeasePaths, verdictRefs, dependsOnPeers: [...dependsOnPeers], openDecisionsCount };
+}
+function stringArray(data, key) {
+  const v = data?.[key];
+  return Array.isArray(v) && v.every((x) => typeof x === "string") ? v : [];
+}
+function conflictInformTouchesHeldPath(entry, heldLeasePaths) {
+  const sub = entry.submission;
+  if (sub.performative !== "inform" || typeof sub.body !== "string" || heldLeasePaths.length === 0)
+    return false;
+  const held = new Set(heldLeasePaths);
+  const lines = sub.body.split(`
+`).slice(1);
+  for (const line of lines) {
+    const sep = line.indexOf(": ");
+    if (sep === -1)
+      continue;
+    if (held.has(line.slice(0, sep)))
+      return true;
+  }
+  return false;
+}
+function matchesDerived(entry, interest) {
+  const sub = entry.submission;
+  if (sub.performative === "decide.request") {
+    const authority = stringArray(sub.data, "authority");
+    if (authority.includes(`id:${interest.selfId}`))
+      return true;
+    if (interest.boundRoles.some((r) => authority.includes(`role:${r}`)))
+      return true;
+  }
+  if (sub.performative === "deliver" && sub.task_ref !== undefined && interest.verdictRefs.includes(sub.task_ref)) {
+    return true;
+  }
+  if (sub.performative === "escalate") {
+    const to = stringArray(sub.data, "to");
+    if (to.includes(interest.selfId))
+      return true;
+    if (interest.boundRoles.some((r) => to.includes(r)))
+      return true;
+  }
+  if (conflictInformTouchesHeldPath(entry, interest.heldLeasePaths))
+    return true;
+  if (sub.performative === "signal") {
+    const condition = sub.data?.["condition"];
+    if ((condition === "stuck" || condition === "gone") && interest.dependsOnPeers.includes(sub.sender)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // src/attention.ts
-function matchesT0(entry, config, selfId) {
+function matchesT0(entry, config, selfId, derived) {
   const sub = entry.submission;
   const subs = config.subscriptions;
   if (subs.mentions === true && Array.isArray(sub.mentions) && sub.mentions.includes(selfId)) {
@@ -15018,6 +15197,9 @@ function matchesT0(entry, config, selfId) {
       if (w.kind === "entry" && matchesWatch(w, entry))
         return true;
     }
+  }
+  if (derived !== undefined && config.attention?.derived !== false && matchesDerived(entry, derived)) {
+    return true;
   }
   return false;
 }
@@ -15063,14 +15245,17 @@ var PERF_STYLE = {
   "key.rotate": { label: "rotate", color: C2.blue },
   "decide.request": { label: "ask", color: C2.cyan, bold: true },
   "decide.resolve": { label: "answer", color: C2.brightGreen, bold: true },
-  "system.decision_lapse": { label: "lapsed", color: C2.yellow }
+  "system.decision_lapse": { label: "lapsed", color: C2.yellow },
+  "escalate.ack": { label: "ack", color: C2.green },
+  "system.role_lapse": { label: "lapse", color: C2.yellow }
 };
 function scrubControl(s) {
   return s.replace(/[\x00-\x1f\x7f]/g, "");
 }
+var CONDITION_STALE_AFTER_MS = 300000 * 3;
 
 // src/wake.ts
-function buildDigest(events, roomId, selfId, maxEvents) {
+function buildDigest(events, roomId, selfId, maxEvents, badge) {
   const total = events.length;
   const shown = events.slice(0, maxEvents);
   const parts = shown.map((e) => {
@@ -15088,7 +15273,8 @@ function buildDigest(events, roomId, selfId, maxEvents) {
     return sub.performative;
   });
   const countLabel = total === 1 ? "1 event" : `${total} events`;
-  return `[mesh] ${countLabel} in ${scrubControl(roomId)}: ${parts.join(", ")}. ` + "Run `mesh inbox` for detail; act via mesh claim/deliver/post.";
+  const base = `[mesh] ${countLabel} in ${scrubControl(roomId)}: ${parts.join(", ")}. ` + "Run `mesh inbox` for detail; act via mesh claim/deliver/post.";
+  return badge ? `${base} ${badge}` : base;
 }
 function buildArrivalPointer(id, roles, roomId) {
   const safeId = scrubControl(id);
@@ -15139,6 +15325,86 @@ class Debouncer {
   }
 }
 
+// ../cli/src/badge.ts
+function composeBadge(counts) {
+  const segments = [];
+  if (counts.unread > 0)
+    segments.push(`unread: ${counts.unread}`);
+  const fsParts = [];
+  if (counts.fsBehind > 0)
+    fsParts.push(`${counts.fsBehind} behind`);
+  if (counts.fsConflict > 0)
+    fsParts.push(`${counts.fsConflict} conflict`);
+  if (fsParts.length > 0)
+    segments.push(`fs: ${fsParts.join(", ")}`);
+  if (counts.openDecisions > 0)
+    segments.push(`${counts.openDecisions} open decisions`);
+  return segments.length > 0 ? segments.join(" · ") : null;
+}
+
+// src/prefetch.ts
+function canReadPath(discoverPosture, grants, selfId, path) {
+  if (discoverPosture === "open")
+    return true;
+  return grants.some((g) => g.subject === selfId && prefixCovers(g.path_prefix, path) && gte(g.access, "read"));
+}
+function fileWriteData(entry) {
+  if (entry.submission.performative !== "file.write")
+    return;
+  const d = entry.submission.data;
+  if (d === undefined || typeof d.path !== "string" || typeof d.content_hash !== "string" || typeof d.size !== "number") {
+    return;
+  }
+  return { path: d.path, content_hash: d.content_hash, size: d.size };
+}
+async function maybePrefetch(entry, deps) {
+  if (!deps.config.enabled)
+    return;
+  const data = fileWriteData(entry);
+  if (data === undefined)
+    return;
+  if (data.size > deps.config.max_bytes)
+    return;
+  if (deps.cache.isWarm(data.path, data.content_hash))
+    return;
+  if (!deps.canRead(data.path))
+    return;
+  try {
+    await deps.cache.warm(data.path, data.content_hash);
+  } catch (err2) {
+    deps.onError?.(data.path, err2);
+  }
+}
+function startAccessRefreshLoop(client, selfId, intervalMs, onSnapshot) {
+  let active = true;
+  let timer = null;
+  const refresh = async () => {
+    if (!active)
+      return;
+    try {
+      const [state, grantsResult] = await Promise.all([client.getState(), client.listGrants()]);
+      const posture = normalizeDefaultAccess(state.defaults.default_access).discover;
+      const grants = Array.isArray(grantsResult) ? grantsResult : [];
+      if (active)
+        onSnapshot((path) => canReadPath(posture, grants, selfId, path));
+    } catch {}
+    if (active)
+      timer = setTimeout(() => {
+        refresh();
+      }, intervalMs);
+  };
+  refresh();
+  return {
+    stop() {
+      active = false;
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    }
+  };
+}
+
 // src/consume.ts
 var CURSOR_FILE = "wake_cursor.json";
 function loadWakeCursor(stateDir) {
@@ -15163,6 +15429,10 @@ class Consumer {
   onWake;
   stateDir;
   selfId;
+  onError;
+  publishRecoverySignal;
+  getWorksetCounts;
+  prefetch;
   running = false;
   streamCursor;
   queuedSeqs = new Set;
@@ -15173,12 +15443,23 @@ class Consumer {
   entryCacheOrder = [];
   static ENTRY_CACHE_CAP = 256;
   entryCacheCap;
-  constructor(client, config, onWake, stateDir, selfId = config.identity.id, testCaps = {}) {
+  derivedInterest;
+  wsConsecutiveFailures = 0;
+  pollConsecutiveFailures = 0;
+  pipeState = "ok";
+  degradedKind = null;
+  constructor(client, config, onWake, stateDir, selfId = config.identity.id, testCaps = {}, onError = (kind, err2, consecutive) => {
+    console.error(`[consume] ${kind} error (consecutive=${consecutive}):`, err2);
+  }, publishRecoverySignal = undefined, getWorksetCounts = undefined, prefetch = undefined) {
     this.client = client;
     this.config = config;
     this.onWake = onWake;
     this.stateDir = stateDir;
     this.selfId = selfId;
+    this.onError = onError;
+    this.publishRecoverySignal = publishRecoverySignal;
+    this.getWorksetCounts = getWorksetCounts;
+    this.prefetch = prefetch;
     mkdirSync(stateDir, { recursive: true });
     this.streamCursor = loadWakeCursor(stateDir);
     this.recentSeqCap = testCaps.recentSeqCap ?? Consumer.RECENT_SEQ_CAP;
@@ -15196,11 +15477,21 @@ class Consumer {
   stop() {
     this.running = false;
   }
+  setDerivedInterest(interest) {
+    this.derivedInterest = interest;
+  }
   async _handleBatch(batch) {
     if (batch.length === 0)
       return;
     const maxSeq = batch.reduce((m, e) => Math.max(m, e.seq), -1);
-    const digest = buildDigest(batch, this.config.room.id, this.selfId, this.config.wake.max_digest_events);
+    const worksetCounts = this.getWorksetCounts?.() ?? null;
+    const badge = composeBadge({
+      unread: batch.length,
+      fsBehind: worksetCounts?.behind ?? 0,
+      fsConflict: worksetCounts?.conflict ?? 0,
+      openDecisions: this.derivedInterest?.openDecisionsCount ?? 0
+    });
+    const digest = buildDigest(batch, this.config.room.id, this.selfId, this.config.wake.max_digest_events, badge);
     await this.onWake(digest, maxSeq);
     await persistWakeCursor(this.stateDir, maxSeq);
   }
@@ -15241,7 +15532,10 @@ class Consumer {
     if (entry.seq > this.streamCursor) {
       this.streamCursor = entry.seq;
     }
-    if (!matchesT0(entry, this.config, this.selfId))
+    if (this.prefetch !== undefined) {
+      maybePrefetch(entry, this.prefetch);
+    }
+    if (!matchesT0(entry, this.config, this.selfId, this.derivedInterest))
       return;
     await this._enqueue(entry, debouncer);
   }
@@ -15287,6 +15581,31 @@ class Consumer {
       }
     }
   }
+  _reportFailure(kind, err2) {
+    const consecutive = kind === "ws" ? ++this.wsConsecutiveFailures : ++this.pollConsecutiveFailures;
+    this.onError(kind, err2, consecutive);
+    const threshold = this.config.consume?.failure_threshold ?? 3;
+    if (consecutive >= threshold && this.pipeState === "ok") {
+      this.pipeState = "degraded";
+      this.degradedKind = kind;
+      console.error(`[consume] pipe dead — ${consecutive} consecutive ${kind} failures (threshold=${threshold})`);
+    }
+  }
+  _reportSuccess(kind) {
+    if (kind === "ws")
+      this.wsConsecutiveFailures = 0;
+    else
+      this.pollConsecutiveFailures = 0;
+    if (this.pipeState !== "degraded" || this.degradedKind !== kind)
+      return;
+    this.pipeState = "ok";
+    this.degradedKind = null;
+    if (!this.config.liveness.publish || this.publishRecoverySignal === undefined)
+      return;
+    this.publishRecoverySignal().catch((e) => {
+      console.error("[consume] pipe recovered but signal(working) republish failed:", e);
+    });
+  }
   async _runLoop(debouncer) {
     while (this.running) {
       let gotData = false;
@@ -15303,7 +15622,10 @@ class Consumer {
             await this._processNotify(frame.entry_seq, debouncer);
           }
         }
-      } catch {}
+        this._reportSuccess("ws");
+      } catch (err2) {
+        this._reportFailure("ws", err2);
+      }
       if (!this.running)
         return;
       const pollSince = this.streamCursor >= 0 ? this.streamCursor : 0;
@@ -15322,12 +15644,14 @@ class Consumer {
           gotData = true;
           await this._processPollNotifies(notifies, result.entries, debouncer);
         }
-      } catch {
+      } catch (err2) {
         if (!this.running)
           return;
+        this._reportFailure("poll", err2);
         await new Promise((r) => setTimeout(r, 1000));
         continue;
       }
+      this._reportSuccess("poll");
       if (!this.running)
         return;
       if (!gotData) {
@@ -15585,8 +15909,8 @@ function checkLivenessCadence(cfg) {
 }
 
 // src/reanchor.ts
-import { existsSync, readFileSync as readFileSync3, writeFileSync } from "node:fs";
-import { join as join2 } from "node:path";
+import { existsSync as existsSync2, readFileSync as readFileSync4, writeFileSync as writeFileSync2 } from "node:fs";
+import { join as join3 } from "node:path";
 
 // src/injectors/tmux.ts
 import { execFile } from "node:child_process";
@@ -15670,142 +15994,6 @@ async function injectWhenIdle(injector, line, opts = {}) {
   }
 }
 
-// src/reanchor.ts
-var LAST_WAKE_FILE = "last_wake.json";
-function isFirstWakeEver(stateDir) {
-  return !existsSync(join2(stateDir, "wake_cursor.json")) && !existsSync(join2(stateDir, LAST_WAKE_FILE));
-}
-function loadLastWakeTs(stateDir) {
-  try {
-    const raw = readFileSync3(join2(stateDir, LAST_WAKE_FILE), "utf8");
-    return JSON.parse(raw).ts;
-  } catch {
-    return null;
-  }
-}
-function stampWakeDelivered(stateDir, ts) {
-  writeFileSync(join2(stateDir, LAST_WAKE_FILE), JSON.stringify({ ts }));
-}
-function shouldReanchor(brief, lastWakeTs, now) {
-  if (!brief.arrival_pointer || brief.reanchor_after_s <= 0)
-    return false;
-  if (lastWakeTs === null)
-    return false;
-  return now - lastWakeTs >= brief.reanchor_after_s * 1000;
-}
-async function resolveMyRoles(client, selfId) {
-  try {
-    const rows = await client.listRoles();
-    return Array.isArray(rows) ? myRoles(rows, selfId) : [];
-  } catch {
-    return [];
-  }
-}
-async function buildWakeLine(config, client, stateDir, digest, now) {
-  const last = loadLastWakeTs(stateDir);
-  if (!shouldReanchor(config.brief, last, now))
-    return digest;
-  const roles = await resolveMyRoles(client, config.identity.id);
-  return buildArrivalPointer(config.identity.id, roles, config.room.id);
-}
-var wakeQueues = new Map;
-function withWakeLock(stateDir, fn) {
-  const priorSettled = (wakeQueues.get(stateDir) ?? Promise.resolve()).then(() => {
-    return;
-  }, () => {
-    return;
-  });
-  const result = priorSettled.then(fn);
-  wakeQueues.set(stateDir, result.then(() => {
-    return;
-  }, () => {
-    return;
-  }));
-  return result;
-}
-function injectOpts(config) {
-  return { busyRetryS: config.wake.tmux?.busy_retry_s, maxBusyWaitS: config.wake.tmux?.max_busy_wait_s };
-}
-async function deliverWake(config, client, injector, stateDir, digest, now) {
-  return withWakeLock(stateDir, async () => {
-    const line = await buildWakeLine(config, client, stateDir, digest, now);
-    const result = await injectWhenIdle(injector, line, injectOpts(config));
-    if (result === "injected")
-      stampWakeDelivered(stateDir, now);
-    return result;
-  });
-}
-async function stampWakeAfterPoke(stateDir, now) {
-  await withWakeLock(stateDir, async () => {
-    stampWakeDelivered(stateDir, now);
-  });
-}
-
-// src/injectors/claude-code.ts
-var CLAUDE_CODE_IDLE_REGEX = /^[❯>]\s*$/;
-var CLAUDE_CODE_BUSY_REGEX = /esc to interrupt/;
-function createClaudeCodeInjector(opts) {
-  return new TmuxInjector({
-    ...opts,
-    idlePromptRegex: CLAUDE_CODE_IDLE_REGEX,
-    busyMarkerRegex: CLAUDE_CODE_BUSY_REGEX
-  });
-}
-
-// src/injectors/omp.ts
-var OMP_IDLE_REGEX = /^[❯>]\s*$/;
-function createOmpInjector(opts) {
-  return new TmuxInjector({ ...opts, idlePromptRegex: OMP_IDLE_REGEX });
-}
-
-// src/injectors/state.ts
-import { statSync, readFileSync as readFileSync4 } from "node:fs";
-var AGENT_STATE_FILE = "agent_state";
-function readHookState(file, busyStaleMs) {
-  let raw;
-  try {
-    raw = readFileSync4(file, "utf8").trim();
-  } catch {
-    return null;
-  }
-  if (raw === "idle")
-    return "idle";
-  if (raw !== "busy")
-    return null;
-  try {
-    const ageMs = Date.now() - statSync(file).mtimeMs;
-    return ageMs <= busyStaleMs ? "busy" : null;
-  } catch {
-    return null;
-  }
-}
-
-class HookStateInjector {
-  inner;
-  pane;
-  stateFile;
-  busyStaleMs;
-  paneExistsFn;
-  constructor(inner, pane, stateFile, busyStaleMs, paneExistsFn = paneExists) {
-    this.inner = inner;
-    this.pane = pane;
-    this.stateFile = stateFile;
-    this.busyStaleMs = busyStaleMs;
-    this.paneExistsFn = paneExistsFn;
-  }
-  async probe() {
-    if (!await this.paneExistsFn(this.pane))
-      return "gone";
-    const hook = readHookState(this.stateFile, this.busyStaleMs);
-    if (hook !== null)
-      return hook;
-    return this.inner.probe();
-  }
-  inject(line) {
-    return this.inner.inject(line);
-  }
-}
-
 // ../cli/src/config.ts
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -15827,6 +16015,30 @@ function getRoom(roomId, home) {
 }
 
 // ../cli/src/client.ts
+var HTTP_STATUS_ERROR = {
+  400: "bad_request",
+  401: "unauthorized",
+  403: "forbidden",
+  404: "not_found",
+  408: "timeout",
+  409: "conflict",
+  413: "artifact_too_large",
+  422: "unprocessable",
+  429: "rate_limited",
+  500: "server_error",
+  502: "bad_gateway",
+  503: "unavailable",
+  504: "gateway_timeout"
+};
+var HTTP_STATUS_HINT = {
+  403: "rejected before reaching the room — check the room URL and token, or an edge proxy/WAF blocking the request (large binary uploads are a common trigger)",
+  413: "file may exceed the room's artifact size limit (25 MB) or the platform request-body limit",
+  429: "rate limited — retry after the indicated delay",
+  502: "upstream/gateway error — the room may be redeploying; retry",
+  503: "service unavailable — the room may be redeploying; retry",
+  504: "gateway timeout — retry"
+};
+
 class MeshClient {
   opts;
   constructor(opts) {
@@ -15902,16 +16114,24 @@ class MeshClient {
   async _err(res) {
     const raw = await res.text().catch(() => "");
     let body = {};
+    let parsed = false;
     try {
-      if (raw)
-        body = JSON.parse(raw);
+      if (raw) {
+        const p = JSON.parse(raw);
+        if (p && typeof p === "object") {
+          body = p;
+          parsed = true;
+        }
+      }
     } catch {}
-    const error = body["error"] ?? "unknown_error";
+    const structuredError = body["error"];
+    const error = structuredError ?? HTTP_STATUS_ERROR[res.status] ?? "unknown_error";
     const statusText = `HTTP ${res.status}${res.statusText ? " " + res.statusText : ""}`;
-    const snippet = raw.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
-    const detail = body["detail"] ?? (error === "unknown_error" ? `${statusText}${snippet ? " — " + snippet : ""}` : res.statusText);
+    const looksMarkup = !parsed && /^\s*<(?:!|\?|[a-zA-Z])/.test(raw);
+    const snippet = looksMarkup ? "non-JSON body (edge/proxy)" : raw.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+    const detail = body["detail"] ?? (structuredError ? res.statusText : `${statusText}${snippet ? " — " + snippet : ""}`);
     const structuredHint = body["hint"] ?? body["tip"];
-    const hint = structuredHint ?? (res.status === 413 ? "file may exceed the room's artifact size limit or the platform request-body limit" : undefined);
+    const hint = structuredHint ?? HTTP_STATUS_HINT[res.status];
     return {
       ok: false,
       error,
@@ -16096,8 +16316,14 @@ class MeshClient {
   async setDefaultAccess(access) {
     return this._postSeq("/config", { default_access: access });
   }
+  async setDefaultAccessSplit(posture) {
+    return this._postSeq("/config", { default_access: posture });
+  }
   async setRateLimit(rateLimit) {
     return this._postSeq("/config", { rate_limit: rateLimit });
+  }
+  async setAuthoritySource(source) {
+    return this._postSeq("/config", { authority_source: source });
   }
   async revokeGrant(subject, path2) {
     return this._postSeq("/grants/revoke", { path_prefix: path2, subject });
@@ -16205,14 +16431,11 @@ class MeshClient {
   }
 }
 
-// src/ipc.ts
-import { createServer } from "node:net";
-import { existsSync as existsSync4, unlinkSync, statSync as statSync2, chmodSync as chmodSync3 } from "node:fs";
-import { basename as pathBasename } from "node:path";
-
-// src/fs-shim.ts
-import * as nodePath from "node:path";
-import { writeFileSync as writeFileSync3, chmodSync as chmodSync2, existsSync as existsSync3, realpathSync } from "node:fs";
+// ../cli/src/artifact.ts
+import { createHash } from "node:crypto";
+function sha256hex(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
 
 // ../cli/src/fs.ts
 function resolveNode(tree, repopath) {
@@ -16228,7 +16451,219 @@ function hashFromRef(content_hash) {
   return m[1];
 }
 
+// ../cli/src/brief.ts
+async function authorOf(client, seq) {
+  try {
+    const result = await client.getEntries({ since: seq - 1, limit: 1 });
+    const entry = result.entries.find((e) => e.seq === seq);
+    return entry?.submission.sender ?? null;
+  } catch {
+    return null;
+  }
+}
+async function resolveMyRoles(client, selfId) {
+  try {
+    const rows = await client.listRoles();
+    return Array.isArray(rows) ? myRoles(rows, selfId) : [];
+  } catch {
+    return [];
+  }
+}
+async function resolveMyWriteGrants(client, selfId, roles) {
+  try {
+    const rows = await client.listGrants();
+    if (!Array.isArray(rows))
+      return null;
+    const subjects = new Set([selfId, ...roles.map((r) => `role:${r}`)]);
+    return rows.filter((g) => subjects.has(g.subject) && gte(g.access, "write")).map((g) => ({ path_prefix: g.path_prefix, access: g.access }));
+  } catch {
+    return null;
+  }
+}
+async function resolveActiveLeases(client) {
+  try {
+    const rows = await client.listLeases();
+    if (!Array.isArray(rows))
+      return null;
+    return rows.map((r) => ({ path: r.path, holder: r.holder, lease_expires: r.lease_expires }));
+  } catch {
+    return null;
+  }
+}
+async function resolveWorkspaceSection(client, selfId, roles, posture) {
+  const [writeGrants, leases] = await Promise.all([
+    resolveMyWriteGrants(client, selfId, roles),
+    resolveActiveLeases(client)
+  ]);
+  return { posture, writeGrants, leases };
+}
+function toDutyClaims(claims) {
+  return claims.map((c) => ({
+    task_ref: c.task_ref,
+    state: c.state,
+    holder: c.holder,
+    depends_on: c.depends_on,
+    verdict_by: c.verdict_by,
+    max_claim_until: c.max_claim_until != null ? Date.parse(c.max_claim_until) : undefined
+  }));
+}
+function buildTeamRows(state, selfId) {
+  const bindings = state.bindings ?? [];
+  return state.roster.map((p) => {
+    const claimedRefs = p.participant_id === selfId ? [] : state.claims.filter((c) => c.state === "CLAIMED" && c.holder === p.participant_id).map((c) => c.task_ref);
+    return {
+      participant_id: p.participant_id,
+      boundRoles: myRoles(bindings, p.participant_id),
+      condition: p.condition ?? null,
+      condition_ts: p.condition_ts ?? null,
+      claimedRefs
+    };
+  });
+}
+function buildBriefInput(state, selfId, roles, roomId, room, roleCharters, workspace, nowMs) {
+  const duties = computeDuties(toDutyClaims(state.claims), selfId, roles, nowMs);
+  const openDecisions = decisionsAwaitingAuthority(state.decisions, selfId, roles).map((d) => ({ id: d.id, question: d.question }));
+  const badge = composeBadge({ unread: 0, fsBehind: 0, fsConflict: 0, openDecisions: openDecisions.length });
+  const team = buildTeamRows(state, selfId);
+  return { selfId, roomId, roles: [...roles], room, roleCharters, duties, openDecisions, workspace, badge, team };
+}
+
+// src/reanchor.ts
+var LAST_WAKE_FILE = "last_wake.json";
+function isFirstWakeEver(stateDir) {
+  return !existsSync2(join3(stateDir, "wake_cursor.json")) && !existsSync2(join3(stateDir, LAST_WAKE_FILE));
+}
+function loadLastWakeTs(stateDir) {
+  try {
+    const raw = readFileSync4(join3(stateDir, LAST_WAKE_FILE), "utf8");
+    return JSON.parse(raw).ts;
+  } catch {
+    return null;
+  }
+}
+function stampWakeDelivered(stateDir, ts) {
+  writeFileSync2(join3(stateDir, LAST_WAKE_FILE), JSON.stringify({ ts }));
+}
+function shouldReanchor(brief, lastWakeTs, now) {
+  if (!brief.arrival_pointer || brief.reanchor_after_s <= 0)
+    return false;
+  if (lastWakeTs === null)
+    return false;
+  return now - lastWakeTs >= brief.reanchor_after_s * 1000;
+}
+async function buildWakeLine(config, client, stateDir, digest, now) {
+  const last = loadLastWakeTs(stateDir);
+  if (!shouldReanchor(config.brief, last, now))
+    return digest;
+  const roles = await resolveMyRoles(client, config.identity.id);
+  return buildArrivalPointer(config.identity.id, roles, config.room.id);
+}
+var wakeQueues = new Map;
+function withWakeLock(stateDir, fn) {
+  const priorSettled = (wakeQueues.get(stateDir) ?? Promise.resolve()).then(() => {
+    return;
+  }, () => {
+    return;
+  });
+  const result = priorSettled.then(fn);
+  wakeQueues.set(stateDir, result.then(() => {
+    return;
+  }, () => {
+    return;
+  }));
+  return result;
+}
+function injectOpts(config) {
+  return { busyRetryS: config.wake.tmux?.busy_retry_s, maxBusyWaitS: config.wake.tmux?.max_busy_wait_s };
+}
+async function deliverWake(config, client, injector, stateDir, digest, now) {
+  return withWakeLock(stateDir, async () => {
+    const line = await buildWakeLine(config, client, stateDir, digest, now);
+    const result = await injectWhenIdle(injector, line, injectOpts(config));
+    if (result === "injected")
+      stampWakeDelivered(stateDir, now);
+    return result;
+  });
+}
+async function stampWakeAfterPoke(stateDir, now) {
+  await withWakeLock(stateDir, async () => {
+    stampWakeDelivered(stateDir, now);
+  });
+}
+
+// src/injectors/claude-code.ts
+var CLAUDE_CODE_IDLE_REGEX = /^[❯>]\s*$/;
+var CLAUDE_CODE_BUSY_REGEX = /esc to interrupt/;
+function createClaudeCodeInjector(opts) {
+  return new TmuxInjector({
+    ...opts,
+    idlePromptRegex: CLAUDE_CODE_IDLE_REGEX,
+    busyMarkerRegex: CLAUDE_CODE_BUSY_REGEX
+  });
+}
+
+// src/injectors/omp.ts
+var OMP_IDLE_REGEX = /^[❯>]\s*$/;
+function createOmpInjector(opts) {
+  return new TmuxInjector({ ...opts, idlePromptRegex: OMP_IDLE_REGEX });
+}
+
+// src/injectors/state.ts
+import { statSync, readFileSync as readFileSync5 } from "node:fs";
+var AGENT_STATE_FILE = "agent_state";
+function readHookState(file, busyStaleMs) {
+  let raw;
+  try {
+    raw = readFileSync5(file, "utf8").trim();
+  } catch {
+    return null;
+  }
+  if (raw === "idle")
+    return "idle";
+  if (raw !== "busy")
+    return null;
+  try {
+    const ageMs = Date.now() - statSync(file).mtimeMs;
+    return ageMs <= busyStaleMs ? "busy" : null;
+  } catch {
+    return null;
+  }
+}
+
+class HookStateInjector {
+  inner;
+  pane;
+  stateFile;
+  busyStaleMs;
+  paneExistsFn;
+  constructor(inner, pane, stateFile, busyStaleMs, paneExistsFn = paneExists) {
+    this.inner = inner;
+    this.pane = pane;
+    this.stateFile = stateFile;
+    this.busyStaleMs = busyStaleMs;
+    this.paneExistsFn = paneExistsFn;
+  }
+  async probe() {
+    if (!await this.paneExistsFn(this.pane))
+      return "gone";
+    const hook = readHookState(this.stateFile, this.busyStaleMs);
+    if (hook !== null)
+      return hook;
+    return this.inner.probe();
+  }
+  inject(line) {
+    return this.inner.inject(line);
+  }
+}
+
+// src/ipc.ts
+import { createServer } from "node:net";
+import { existsSync as existsSync4, unlinkSync, statSync as statSync2, chmodSync as chmodSync3 } from "node:fs";
+import { basename as pathBasename } from "node:path";
+
 // src/fs-shim.ts
+import * as nodePath from "node:path";
+import { writeFileSync as writeFileSync3, chmodSync as chmodSync2, existsSync as existsSync3, realpathSync } from "node:fs";
 function isCacheFresh(cachedHash, treeHash) {
   return cachedHash !== undefined && cachedHash === treeHash;
 }
@@ -16278,6 +16713,27 @@ class WorkspaceCache {
     this._totalBytes += blobResult.byteLength;
     this._evict();
     return blobResult;
+  }
+  isWarm(path2, hash) {
+    return this._entries.get(path2)?.hash === hash;
+  }
+  async warm(path2, hash) {
+    if (this.isWarm(path2, hash))
+      return;
+    const rawHash = hashFromRef(hash);
+    const blobResult = await this._client.getArtifact(rawHash);
+    if (!(blobResult instanceof Uint8Array)) {
+      throw new Error(`WorkspaceCache.warm: getArtifact failed for "${path2}" (hash ${rawHash}): ${blobResult.error}`);
+    }
+    const existing = this._entries.get(path2);
+    if (existing !== undefined) {
+      this._totalBytes -= existing.bytes.byteLength;
+      this._entries.delete(path2);
+    }
+    const entry = { hash, bytes: blobResult, atime: Date.now() };
+    this._entries.set(path2, entry);
+    this._totalBytes += blobResult.byteLength;
+    this._evict();
   }
   async ls(prefix) {
     const result = await this._client.getTree(prefix);
@@ -16666,50 +17122,6 @@ function installShims(binDir, socketPath, workspace) {
   }
 }
 
-// ../cli/src/brief.ts
-async function authorOf(client, seq) {
-  try {
-    const result = await client.getEntries({ since: seq - 1, limit: 1 });
-    const entry = result.entries.find((e) => e.seq === seq);
-    return entry?.submission.sender ?? null;
-  } catch {
-    return null;
-  }
-}
-async function resolveMyWriteGrants(client, selfId, roles) {
-  try {
-    const rows = await client.listGrants();
-    if (!Array.isArray(rows))
-      return null;
-    const subjects = new Set([selfId, ...roles.map((r) => `role:${r}`)]);
-    return rows.filter((g) => subjects.has(g.subject) && gte(g.access, "write")).map((g) => ({ path_prefix: g.path_prefix, access: g.access }));
-  } catch {
-    return null;
-  }
-}
-async function resolveActiveLeases(client) {
-  try {
-    const rows = await client.listLeases();
-    if (!Array.isArray(rows))
-      return null;
-    return rows.map((r) => ({ path: r.path, holder: r.holder, lease_expires: r.lease_expires }));
-  } catch {
-    return null;
-  }
-}
-async function resolveWorkspaceSection(client, selfId, roles, posture) {
-  const [writeGrants, leases] = await Promise.all([
-    resolveMyWriteGrants(client, selfId, roles),
-    resolveActiveLeases(client)
-  ]);
-  return { posture, writeGrants, leases };
-}
-function buildBriefInput(state, selfId, roles, roomId, room, roleCharters, workspace) {
-  const duties = computeDuties(state.claims, selfId, roles);
-  const openDecisions = state.decisions.filter((d) => d.status === "open" && (d.authority.includes(`id:${selfId}`) || roles.some((r) => d.authority.includes(`role:${r}`)))).map((d) => ({ id: d.id, question: d.question }));
-  return { selfId, roomId, roles: [...roles], room, roleCharters, duties, openDecisions, workspace };
-}
-
 // src/ipc.ts
 function startIpcServer(opts) {
   const { client, socketPath, selfId, roomId, cache } = opts;
@@ -16860,8 +17272,8 @@ function startIpcServer(opts) {
       };
       const room = await readSection(CHARTER_ROOM_PATH);
       const roleCharters = await Promise.all(roles.map((role) => readSection(charterRolePath(role))));
-      const workspace = await resolveWorkspaceSection(client, selfId ?? "", roles, state.defaults.default_access ?? "open");
-      return buildBriefInput(state, selfId ?? "", roles, roomId ?? "", room, roleCharters, workspace);
+      const workspace = await resolveWorkspaceSection(client, selfId ?? "", roles, normalizeDefaultAccess(state.defaults.default_access).write);
+      return buildBriefInput(state, selfId ?? "", roles, roomId ?? "", room, roleCharters, workspace, Date.now());
     }
     if (method === "fs_ls") {
       if (!cache)
@@ -30089,6 +30501,7 @@ function createMcpServer(socketPath) {
         "signal",
         "decide.request",
         "decide.resolve",
+        "escalate.ack",
         "key.rotate",
         "file.write",
         "file.delete",
@@ -30380,7 +30793,7 @@ function matchesWatchPredicate(entry, w, selfId) {
     if (w.mention_me === true && !(Array.isArray(sub.mentions) && sub.mentions.includes(selfId))) {
       return false;
     }
-    if (w.path !== undefined || w.participant !== undefined) {
+    if (w.path !== undefined || w.participant !== undefined || w.task_ref !== undefined) {
       return matchesWatch(w, entry);
     }
     return true;
@@ -30442,7 +30855,25 @@ function startNudgeLoop(checkInbox, pollHintMs, inject) {
 }
 
 // src/duties.ts
-function startDutyLoop(getState, selfId, configRoles, intervalMs, inject) {
+function toDutyClaims2(claims) {
+  return claims.map((c) => ({
+    task_ref: c.task_ref,
+    state: c.state,
+    holder: c.holder,
+    depends_on: c.depends_on,
+    verdict_by: c.verdict_by,
+    max_claim_until: c.max_claim_until != null ? Date.parse(c.max_claim_until) : undefined
+  }));
+}
+function composeDutyLine(duties, badge) {
+  const dutiesLine = formatDuties(duties);
+  if (dutiesLine !== null)
+    return badge !== null ? `${dutiesLine} ${badge}` : dutiesLine;
+  if (badge !== null)
+    return `[mesh] ${badge}. Run \`mesh inbox\`/\`mesh brief\` for detail.`;
+  return null;
+}
+function startDutyLoop(getState, selfId, configRoles, intervalMs, inject, getLeases, onDerivedInterest, getWorksetCounts) {
   let active = true;
   let lastSig = "";
   let timer = null;
@@ -30457,18 +30888,31 @@ function startDutyLoop(getState, selfId, configRoles, intervalMs, inject) {
     if (!active)
       return;
     try {
-      const { claims, roster } = await getState();
-      const self = roster.find((r) => r.participant_id === selfId);
-      const roles = self ? [...new Set([...configRoles, ...self.roles])] : configRoles;
-      const duties = computeDuties(claims, selfId, roles);
-      const sig = dutiesSignature(duties);
+      const { claims, roster, bindings, decisions } = await getState();
+      const nowMs = Date.now();
+      const boundRoles = (bindings ?? []).filter((b) => b.participant === selfId && b.in_window).map((b) => b.role);
+      const roles = [...new Set([...configRoles, ...boundRoles])];
+      const duties = computeDuties(toDutyClaims2(claims), selfId, roles, nowMs);
+      const openDecisions = decisionsAwaitingAuthority(decisions ?? [], selfId, boundRoles).length;
+      const worksetCounts = getWorksetCounts?.() ?? null;
+      const badge = composeBadge({
+        unread: 0,
+        fsBehind: worksetCounts?.behind ?? 0,
+        fsConflict: worksetCounts?.conflict ?? 0,
+        openDecisions
+      });
+      const sig = `${dutiesSignature(duties)}|b:${badge ?? ""}`;
       if (sig !== lastSig) {
-        const line = formatDuties(duties);
+        const line = composeDutyLine(duties, badge);
         if (line === null) {
           lastSig = sig;
         } else if (await inject(line)) {
           lastSig = sig;
         }
+      }
+      if (onDerivedInterest !== undefined) {
+        const leases = getLeases !== undefined ? await getLeases() : [];
+        onDerivedInterest(buildDerivedInterest({ bindings: bindings ?? [], claims, decisions }, leases, selfId, Date.now()));
       }
     } catch {}
     schedule();
@@ -30485,9 +30929,203 @@ function startDutyLoop(getState, selfId, configRoles, intervalMs, inject) {
   };
 }
 
+// src/workset.ts
+import { existsSync as existsSync6, readFileSync as readFileSync7, statSync as statSync3 } from "node:fs";
+import { join as join6 } from "node:path";
+
+// ../cli/src/edit-base.ts
+import * as fs2 from "node:fs";
+import * as path2 from "node:path";
+function sidecarPath(roomId, repopath, home) {
+  for (const [label, raw] of [["roomId", roomId], ["repopath", repopath]]) {
+    let decoded;
+    try {
+      decoded = decodeURIComponent(raw);
+    } catch {
+      decoded = raw;
+    }
+    if (decoded === "." || decoded === ".." || decoded.split(/[/\\]/).some((seg) => seg === "..")) {
+      throw new Error(`sidecarPath: illegal ${label} "${raw}"`);
+    }
+  }
+  return path2.join(home ?? meshHome(), "edit-base", roomId, encodeURIComponent(repopath));
+}
+function readSidecar(roomId, repopath, home) {
+  const p = sidecarPath(roomId, repopath, home);
+  if (!fs2.existsSync(p))
+    return;
+  try {
+    fs2.chmodSync(p, 384);
+  } catch {}
+  try {
+    return JSON.parse(fs2.readFileSync(p, "utf8"));
+  } catch {
+    return;
+  }
+}
+
+// ../cli/src/sync.ts
+function classifySync(input) {
+  if (input.tipGated)
+    return "gated";
+  const { localHash, baseTipHash, tipHash } = input;
+  const L3 = localHash !== undefined;
+  const B = baseTipHash !== undefined;
+  const T = tipHash !== undefined;
+  if (!L3 && !B && !T)
+    return "vacuous";
+  if (L3 && !B && !T)
+    return "untracked";
+  if (!L3 && !B && T)
+    return "room-only";
+  if (!L3 && B && !T)
+    return "orphan-base";
+  if (!L3 && B && T)
+    return "local-deleted";
+  if (L3 && B && !T)
+    return localHash === baseTipHash ? "room-deleted-clean" : "room-deleted-dirty";
+  if (L3 && !B && T)
+    return localHash === tipHash ? "adopt" : "never-synced";
+  const lb = localHash === baseTipHash;
+  const bt = baseTipHash === tipHash;
+  const lt = localHash === tipHash;
+  if (lb && bt)
+    return "in-sync";
+  if (!lb && bt)
+    return "ahead";
+  if (lb && !bt)
+    return "behind";
+  if (lt)
+    return "converged";
+  return "diverged";
+}
+
+// src/workset.ts
+var CONFLICT_STATES = { diverged: true, "never-synced": true };
+
+class WorksetScanner {
+  client;
+  roomId;
+  workspaceRoot;
+  intervalMs;
+  meshHomeDir;
+  onScanCb;
+  hashFile;
+  log;
+  onError;
+  cache = new Map;
+  latest = null;
+  warnedNoSidecarDir = false;
+  _stopRequested = false;
+  _wakeUp = null;
+  _loopPromise = null;
+  constructor(opts) {
+    this.client = opts.client;
+    this.roomId = opts.roomId;
+    this.workspaceRoot = opts.workspaceRoot;
+    this.intervalMs = opts.intervalMs;
+    this.meshHomeDir = opts.meshHome ?? meshHome();
+    this.onScanCb = opts.onScan;
+    this.hashFile = opts.hashFile ?? sha256hex;
+    this.log = opts.onLog ?? ((line) => console.warn(line));
+    this.onError = opts.onError ?? ((err2) => console.error("[workset] scan error:", err2));
+  }
+  start() {
+    if (this._loopPromise !== null)
+      return;
+    this._stopRequested = false;
+    this._loopPromise = this._loop();
+  }
+  async stop() {
+    this._stopRequested = true;
+    this._wakeUp?.();
+    await this._loopPromise;
+    this._loopPromise = null;
+  }
+  getCounts() {
+    return this.latest;
+  }
+  async _sleep(ms) {
+    const { promise: promise2, resolve: resolve2 } = Promise.withResolvers();
+    this._wakeUp = resolve2;
+    const handle = setTimeout(resolve2, ms);
+    await promise2;
+    clearTimeout(handle);
+    this._wakeUp = null;
+  }
+  async _loop() {
+    while (!this._stopRequested) {
+      await this._sleep(this.intervalMs);
+      if (this._stopRequested)
+        break;
+      try {
+        await this._tick();
+      } catch (err2) {
+        this.onError(err2);
+      }
+    }
+  }
+  async _tick() {
+    const sidecarDir = join6(this.meshHomeDir, "edit-base", this.roomId);
+    if (!existsSync6(sidecarDir)) {
+      if (!this.warnedNoSidecarDir) {
+        this.log(`[workset] room "${this.roomId}" has no local sync history yet (no edit-base dir) — ` + `skipping tree-diff scan until \`mesh fs get/put/edit\` seeds one`);
+        this.warnedNoSidecarDir = true;
+      }
+      return;
+    }
+    this.warnedNoSidecarDir = false;
+    const treeResult = await this.client.getTree();
+    if ("error" in treeResult) {
+      this.onError(new Error(`workset: getTree failed: [${treeResult.error}] ${treeResult.detail}`));
+      return;
+    }
+    let behind = 0;
+    let conflict = 0;
+    for (const row of treeResult.tree) {
+      const tipHash = row.content_hash;
+      const sidecar = readSidecar(this.roomId, row.path, this.meshHomeDir);
+      const state = classifySync({
+        localHash: this.localHash(row.path),
+        baseTipHash: sidecar?.tip_hash,
+        tipHash,
+        tipGated: tipHash === undefined
+      });
+      if (state === "behind")
+        behind++;
+      else if (CONFLICT_STATES[state])
+        conflict++;
+    }
+    this.latest = { behind, conflict, scannedAt: Date.now() };
+    this.onScanCb?.(this.latest);
+  }
+  localHash(repoPath) {
+    const abs = join6(this.workspaceRoot, repoPath);
+    let st;
+    try {
+      st = statSync3(abs);
+    } catch {
+      this.cache.delete(repoPath);
+      return;
+    }
+    if (!st.isFile()) {
+      this.cache.delete(repoPath);
+      return;
+    }
+    const cached2 = this.cache.get(repoPath);
+    if (cached2 && cached2.mtimeMs === st.mtimeMs && cached2.size === st.size) {
+      return cached2.hash;
+    }
+    const bytes = readFileSync7(abs);
+    const hash = "r2:" + this.hashFile(new Uint8Array(bytes));
+    this.cache.set(repoPath, { mtimeMs: st.mtimeMs, size: st.size, hash });
+    return hash;
+  }
+}
+
 // src/main.ts
 function resolveHome(p) {
-  return p.startsWith("~/") ? join5(homedir2(), p.slice(2)) : resolve2(p);
+  return p.startsWith("~/") ? join7(homedir2(), p.slice(2)) : resolve2(p);
 }
 function flag(args, name) {
   const idx = args.indexOf(name);
@@ -30511,9 +31149,9 @@ function pidAlive(pid) {
 }
 function loadSecretBytes(config2) {
   const keyPath = resolveHome(config2.identity.key);
-  if (!existsSync5(keyPath))
+  if (!existsSync7(keyPath))
     die(`identity key not found: ${keyPath}`);
-  const identityFile = JSON.parse(readFileSync6(keyPath, "utf8"));
+  const identityFile = JSON.parse(readFileSync8(keyPath, "utf8"));
   const secretBytes = new Uint8Array(Buffer.from(identityFile.secret, "base64"));
   return { secretBytes, identityFile };
 }
@@ -30563,7 +31201,7 @@ function livenessOptsFrom(config2, stateDir) {
     intervalMs: config2.liveness.interval_s * 1000,
     stuckAfterMs: config2.liveness.stuck_after_s * 1000,
     debounceMs: config2.liveness.debounce_s * 1000,
-    hookStateFile: config2.wake.tmux ? join5(stateDir, AGENT_STATE_FILE) : null
+    hookStateFile: config2.wake.tmux ? join7(stateDir, AGENT_STATE_FILE) : null
   };
 }
 async function cmdRun(configPath, opts) {
@@ -30573,11 +31211,11 @@ async function cmdRun(configPath, opts) {
   if (!roomEntry)
     die(`no token for room "${config2.room.id}" — run "mesh join" first`);
   const stateDir = resolveHome(config2.state_dir);
-  mkdirSync3(stateDir, { recursive: true, mode: 448 });
+  mkdirSync4(stateDir, { recursive: true, mode: 448 });
   if (!opts.foreground && process.env["MESHL_DETACHED"] !== "1") {
-    const pidPath = join5(stateDir, "daemon.pid");
-    if (existsSync5(pidPath)) {
-      const existing = parseInt(readFileSync6(pidPath, "utf8").trim(), 10);
+    const pidPath = join7(stateDir, "daemon.pid");
+    if (existsSync7(pidPath)) {
+      const existing = parseInt(readFileSync8(pidPath, "utf8").trim(), 10);
       if (Number.isInteger(existing) && pidAlive(existing)) {
         if (!opts.force) {
           die(`meshl already running for this config (pid ${existing}, room ${config2.room.id}).
@@ -30590,14 +31228,14 @@ async function cmdRun(configPath, opts) {
         console.log(`[meshl] replacing running daemon (pid ${existing})`);
       }
     }
-    const logPath = join5(stateDir, "daemon.log");
+    const logPath = join7(stateDir, "daemon.log");
     const out = openSync(logPath, "a");
     const child = spawn(process.execPath, [process.argv[1], "run", "--config", configPath, "--foreground"], {
       detached: true,
       stdio: ["ignore", out, out],
       env: { ...process.env, MESHL_DETACHED: "1" }
     });
-    writeFileSync4(pidPath, `${child.pid}
+    writeFileSync5(pidPath, `${child.pid}
 `, { mode: 384 });
     child.unref();
     console.log(`meshl daemon started — pid ${child.pid}, room ${config2.room.id}`);
@@ -30618,8 +31256,8 @@ async function cmdRun(configPath, opts) {
   const livenessWarn = checkLivenessCadence(config2.liveness);
   if (livenessWarn !== null)
     console.warn(`[meshl] ${livenessWarn}`);
-  const socketPath = join5(stateDir, "daemon.sock");
-  const cache = new WorkspaceCache(join5(stateDir, "fs", config2.room.id), client);
+  const socketPath = join7(stateDir, "daemon.sock");
+  const cache = new WorkspaceCache(join7(stateDir, "fs", config2.room.id), client);
   const ipcHandle = await startIpcServer({
     client,
     stateDir,
@@ -30628,12 +31266,19 @@ async function cmdRun(configPath, opts) {
     roomId: config2.room.id,
     cache
   });
+  const worksetScanner = config2.workset?.enabled === false ? null : new WorksetScanner({
+    client,
+    roomId: config2.room.id,
+    workspaceRoot: resolveHome(config2.workspace?.root ?? "."),
+    intervalMs: (config2.workset?.interval_s ?? 15) * 1000
+  });
+  worksetScanner?.start();
   if (config2.wake.backend === "mcp") {
-    return runPullOnly(config2, client, stateDir, socketPath, ipcHandle);
+    return runPullOnly(config2, client, stateDir, socketPath, ipcHandle, worksetScanner);
   }
-  return runInjecting(config2, client, stateDir, socketPath, ipcHandle);
+  return runInjecting(config2, client, stateDir, socketPath, ipcHandle, worksetScanner, cache);
 }
-async function runPullOnly(config2, client, stateDir, socketPath, ipcHandle) {
+async function runPullOnly(config2, client, stateDir, socketPath, ipcHandle, worksetScanner) {
   const noopInjector = {
     probe: async () => "idle",
     inject: async () => {}
@@ -30659,14 +31304,15 @@ async function runPullOnly(config2, client, stateDir, socketPath, ipcHandle) {
   process.once("SIGTERM", shutdown);
   console.log(`[meshl] running (pull-only/mcp) — room=${config2.room.id} id=${config2.identity.id} socket=${socketPath}`);
   await promise2;
+  await worksetScanner?.stop();
   await liveness?.stop();
   await heartbeater.stop();
   await ipcHandle.close();
   console.log("[meshl] stopped");
 }
-async function runInjecting(config2, client, stateDir, socketPath, ipcHandle) {
+async function runInjecting(config2, client, stateDir, socketPath, ipcHandle, worksetScanner, cache) {
   const rawInjector = buildInjector(config2);
-  const injector = config2.wake.tmux ? new HookStateInjector(rawInjector, config2.wake.tmux.pane, join5(stateDir, AGENT_STATE_FILE), (config2.wake.hook_busy_stale_s ?? 900) * 1000) : rawInjector;
+  const injector = config2.wake.tmux ? new HookStateInjector(rawInjector, config2.wake.tmux.pane, join7(stateDir, AGENT_STATE_FILE), (config2.wake.hook_busy_stale_s ?? 900) * 1000) : rawInjector;
   if (config2.brief.arrival_pointer && isFirstWakeEver(stateDir)) {
     (async () => {
       const roles = await resolveMyRoles(client, config2.identity.id);
@@ -30740,12 +31386,32 @@ async function runInjecting(config2, client, stateDir, socketPath, ipcHandle) {
       }
     };
   }
-  const consumer = new Consumer(consumerClient, config2, onWakeCb, stateDir);
+  const prefetchConfig = config2.prefetch ?? { enabled: true, max_bytes: 5000000 };
+  let canReadForPrefetch = () => false;
+  const accessRefreshHandle = prefetchConfig.enabled ? startAccessRefreshLoop(client, config2.identity.id, (config2.wake.duty_poll_interval_s ?? 60) * 1000, (canRead) => {
+    canReadForPrefetch = canRead;
+  }) : null;
+  const prefetchDeps = {
+    cache,
+    config: prefetchConfig,
+    canRead: (path3) => canReadForPrefetch(path3),
+    onError: (path3, err2) => {
+      console.error(`[meshl] prefetch warm failed for "${path3}" (cache-only miss — a real read still hydrates it):`, err2);
+    }
+  };
+  const consumer = new Consumer(consumerClient, config2, onWakeCb, stateDir, config2.identity.id, {}, (kind, err2, consecutive) => {
+    console.error(`[meshl] consume ${kind} error (consecutive=${consecutive}):`, err2);
+  }, async () => {
+    await client.postEntry({ performative: "signal", data: { condition: "working" } });
+  }, () => worksetScanner?.getCounts() ?? null, prefetchConfig.enabled ? prefetchDeps : undefined);
   const dutyIntervalS = config2.wake.duty_poll_interval_s ?? 60;
   const dutyHandle = dutyIntervalS > 0 ? startDutyLoop(async () => {
     const s = await client.getState();
-    return { claims: s.claims, roster: s.roster };
-  }, config2.identity.id, config2.subscriptions.roles ?? [], dutyIntervalS * 1000, async (line) => await deliverWake(config2, client, injector, stateDir, line, Date.now()) === "injected") : null;
+    return { claims: s.claims, roster: s.roster, bindings: s.bindings, decisions: s.decisions };
+  }, config2.identity.id, config2.subscriptions.roles ?? [], dutyIntervalS * 1000, async (line) => await deliverWake(config2, client, injector, stateDir, line, Date.now()) === "injected", async () => {
+    const leases = await client.listLeases({ mine: true });
+    return Array.isArray(leases) ? leases : [];
+  }, (interest) => consumer.setDerivedInterest(interest), () => worksetScanner?.getCounts() ?? null) : null;
   const onRoomGone = (err2) => {
     const reason = err2 instanceof Error ? err2.message : String(err2);
     console.error(`[meshl] room "${config2.room.id}" is gone or your membership was revoked (${reason}) — stopping daemon.`);
@@ -30753,6 +31419,7 @@ async function runInjecting(config2, client, stateDir, socketPath, ipcHandle) {
     consumer.stop();
     nudgeHandle?.stop();
     dutyHandle?.stop();
+    accessRefreshHandle?.stop();
   };
   const heartbeater = new Heartbeater(client, injector, config2.identity.id, config2.heartbeat.interval_s * 1000, (err2) => {
     console.error("[meshl] heartbeat error:", err2);
@@ -30767,34 +31434,37 @@ async function runInjecting(config2, client, stateDir, socketPath, ipcHandle) {
     consumer.stop();
     nudgeHandle?.stop();
     dutyHandle?.stop();
+    accessRefreshHandle?.stop();
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
   console.log(`[meshl] running — room=${config2.room.id} id=${config2.identity.id} socket=${socketPath}`);
   await consumer.start();
+  await worksetScanner?.stop();
+  accessRefreshHandle?.stop();
   await liveness?.stop();
   await heartbeater.stop();
   await ipcHandle.close();
   try {
-    const pidPath = join5(stateDir, "daemon.pid");
-    if (existsSync5(pidPath) && parseInt(readFileSync6(pidPath, "utf8").trim(), 10) === process.pid) {
-      rmSync2(pidPath, { force: true });
+    const pidPath = join7(stateDir, "daemon.pid");
+    if (existsSync7(pidPath) && parseInt(readFileSync8(pidPath, "utf8").trim(), 10) === process.pid) {
+      rmSync3(pidPath, { force: true });
     }
   } catch {}
   console.log("[meshl] stopped");
 }
 async function cmdMcp(stateDir) {
-  const socketPath = join5(stateDir, "daemon.sock");
+  const socketPath = join7(stateDir, "daemon.sock");
   await runMcpStdio(socketPath);
 }
 async function cmdStop(configPath) {
   const config2 = loadConfig(configPath);
   const stateDir = resolveHome(config2.state_dir);
-  const pidPath = join5(stateDir, "daemon.pid");
-  if (!existsSync5(pidPath)) {
+  const pidPath = join7(stateDir, "daemon.pid");
+  if (!existsSync7(pidPath)) {
     die(`no daemon.pid in ${stateDir} — daemon not running? (start: meshl run --config ${configPath})`);
   }
-  const pid = parseInt(readFileSync6(pidPath, "utf8").trim(), 10);
+  const pid = parseInt(readFileSync8(pidPath, "utf8").trim(), 10);
   if (!Number.isInteger(pid))
     die(`invalid pid in ${pidPath}`);
   try {
@@ -30807,7 +31477,7 @@ async function cmdStop(configPath) {
     else
       die(`failed to stop pid ${pid}: ${err2.message}`);
   }
-  rmSync2(pidPath, { force: true });
+  rmSync3(pidPath, { force: true });
 }
 async function cmdValidate(configPath) {
   let config2;
@@ -30827,7 +31497,7 @@ async function cmdValidate(configPath) {
 `);
   };
   const keyPath = resolveHome(config2.identity.key);
-  if (existsSync5(keyPath)) {
+  if (existsSync7(keyPath)) {
     pass(`identity key readable: ${keyPath}`);
   } else {
     fail(`identity key not found: ${keyPath}`);
@@ -30888,11 +31558,11 @@ async function cmdValidate(configPath) {
 async function cmdStatus(configPath) {
   const config2 = loadConfig(configPath);
   const stateDir = resolveHome(config2.state_dir);
-  const cursorPath = join5(stateDir, "wake_cursor.json");
+  const cursorPath = join7(stateDir, "wake_cursor.json");
   let cursorSeq = "none";
-  if (existsSync5(cursorPath)) {
+  if (existsSync7(cursorPath)) {
     try {
-      const raw = JSON.parse(readFileSync6(cursorPath, "utf8"));
+      const raw = JSON.parse(readFileSync8(cursorPath, "utf8"));
       cursorSeq = String(raw.seq);
     } catch {
       cursorSeq = "unreadable";
@@ -30916,10 +31586,10 @@ async function cmdStatus(configPath) {
   let hookState = "n/a";
   if (config2.wake.backend === "tmux" && config2.wake.tmux) {
     const staleMs = (config2.wake.hook_busy_stale_s ?? 900) * 1000;
-    const stateFile = join5(stateDir, AGENT_STATE_FILE);
+    const stateFile = join7(stateDir, AGENT_STATE_FILE);
     try {
-      const raw = readFileSync6(stateFile, "utf8").trim();
-      const ageS = Math.round((Date.now() - statSync3(stateFile).mtimeMs) / 1000);
+      const raw = readFileSync8(stateFile, "utf8").trim();
+      const ageS = Math.round((Date.now() - statSync4(stateFile).mtimeMs) / 1000);
       hookState = raw === "busy" && ageS * 1000 > staleMs ? `busy (age ${ageS}s — STALE > ${Math.round(staleMs / 1000)}s, ignored → scrape)` : `${raw} (age ${ageS}s)`;
     } catch {
       hookState = `<none> — no hook installed; using scrape fallback (install: meshl hooks)`;
@@ -30963,11 +31633,11 @@ async function cmdPoke(configPath, opts = { brief: false }) {
       const { secretBytes } = loadSecretBytes(config2);
       client = buildClient(config2, secretBytes, roomEntry.token);
       const state = await client.getState();
-      const cursorPath = join5(stateDir, "wake_cursor.json");
+      const cursorPath = join7(stateDir, "wake_cursor.json");
       let cursorNum = -1;
-      if (existsSync5(cursorPath)) {
+      if (existsSync7(cursorPath)) {
         try {
-          cursorNum = JSON.parse(readFileSync6(cursorPath, "utf8")).seq;
+          cursorNum = JSON.parse(readFileSync8(cursorPath, "utf8")).seq;
         } catch {}
       }
       depth = String(Math.max(0, state.head.seq - cursorNum));
@@ -31012,9 +31682,9 @@ wake.backend (in mesh.yml):  tmux (push into a pane) | mcp (pull-only, no tmux) 
 async function cmdExec(opts) {
   const resolvedWorkspace = resolveHome(opts.workspace);
   const resolvedStateDir = resolveHome(opts.stateDir);
-  const binDir = join5(resolvedStateDir, "shims");
-  const socketPath = join5(resolvedStateDir, "daemon.sock");
-  mkdirSync3(binDir, { recursive: true, mode: 448 });
+  const binDir = join7(resolvedStateDir, "shims");
+  const socketPath = join7(resolvedStateDir, "daemon.sock");
+  mkdirSync4(binDir, { recursive: true, mode: 448 });
   installShims(binDir, socketPath, resolvedWorkspace);
   const childEnv = buildExecEnv({
     binDir,
@@ -31038,7 +31708,7 @@ async function cmdExec(opts) {
   });
 }
 function cmdHooks(stateDir, runtime) {
-  const file = join5(stateDir, AGENT_STATE_FILE);
+  const file = join7(stateDir, AGENT_STATE_FILE);
   if (runtime === "omp") {
     process.stderr.write(`# Oh My Pi (omp) idle/busy hook. Save it, then launch the agent with --hook:
 ` + `#   meshl hooks --runtime omp --state-dir ${stateDir} > ~/mesh-agent/state-hook.ts

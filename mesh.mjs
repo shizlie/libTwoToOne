@@ -1208,6 +1208,21 @@ function prefixCovers(prefix, path) {
   const base = prefixBase(prefix);
   return path === base || path.startsWith(base + "/");
 }
+function isOpenClosed(v) {
+  return v === "open" || v === "closed";
+}
+function normalizeDefaultAccess(v) {
+  if (isOpenClosed(v))
+    return { discover: v, write: v };
+  if (v !== null && typeof v === "object") {
+    const o = v;
+    return {
+      discover: isOpenClosed(o.discover) ? o.discover : "open",
+      write: isOpenClosed(o.write) ? o.write : "open"
+    };
+  }
+  return { discover: "open", write: "open" };
+}
 
 // ../proto/src/performatives.ts
 var PERFORMATIVE_SET = {
@@ -1238,7 +1253,9 @@ var PERFORMATIVE_SET = {
   "system.revoke": true,
   "decide.request": true,
   "decide.resolve": true,
-  "system.decision_lapse": true
+  "system.decision_lapse": true,
+  "system.role_lapse": true,
+  "escalate.ack": true
 };
 var ROOM_ONLY = {
   escalate: true,
@@ -1251,11 +1268,16 @@ var ROOM_ONLY = {
   "system.config": true,
   "system.lease_clear": true,
   "system.revoke": true,
-  "system.decision_lapse": true
+  "system.decision_lapse": true,
+  "system.role_lapse": true
 };
 var PARTICIPANT_PERFORMATIVES = Object.keys(PERFORMATIVE_SET).filter((p) => !(p in ROOM_ONLY));
 // ../proto/src/machine.ts
 var MAX_DURATION_S = 30 * 24 * 60 * 60;
+// ../proto/src/decisions.ts
+function decisionsAwaitingAuthority(decisions, selfId, roles) {
+  return decisions.filter((d) => d.status === "open" && (d.authority.includes(`id:${selfId}`) || roles.some((r) => d.authority.includes(`role:${r}`))));
+}
 // ../proto/src/ws.ts
 var WS_PING = '{"type":"ping"}';
 // ../proto/src/policy.ts
@@ -1337,8 +1359,15 @@ function myRoles(bindings, selfId) {
   return roles;
 }
 // ../proto/src/duties.ts
+function isClaimStalled(c, selfId, nowMs) {
+  if (c.state !== "CLAIMED")
+    return false;
+  if (selfId !== null && c.holder !== selfId)
+    return false;
+  return c.max_claim_until != null && c.max_claim_until <= nowMs;
+}
 var DEP_SATISFIED = new Set(["DELIVERED", "DONE"]);
-function computeDuties(claims, selfId, roles) {
+function computeDuties(claims, selfId, roles, nowMs) {
   const stateByRef = new Map(claims.map((c) => [c.task_ref, c.state]));
   const depsSatisfied = (deps) => deps.every((d) => {
     const st = stateByRef.get(d);
@@ -1348,6 +1377,7 @@ function computeDuties(claims, selfId, roles) {
   const claimable = [];
   const verdict = [];
   const ready = [];
+  const stalled = [];
   for (const c of claims) {
     if (c.state === "ANNOUNCED" && !c.holder && depsSatisfied(c.depends_on)) {
       claimable.push(c.task_ref);
@@ -1356,11 +1386,16 @@ function computeDuties(claims, selfId, roles) {
     } else if (c.state === "CLAIMED" && c.holder === selfId && c.depends_on.length > 0 && depsSatisfied(c.depends_on)) {
       ready.push(c.task_ref);
     }
+    if (isClaimStalled(c, selfId, nowMs)) {
+      stalled.push(c.task_ref);
+    }
   }
-  return { claimable, verdict, ready };
+  return { claimable, verdict, ready, stalled };
 }
 function dutyParts(d) {
   const parts = [];
+  if (d.stalled.length)
+    parts.push(`stalled (needs release or a push): ${d.stalled.join(", ")}`);
   if (d.verdict.length)
     parts.push(`awaiting your verdict (accept/reject): ${d.verdict.join(", ")}`);
   if (d.ready.length)
@@ -1671,6 +1706,30 @@ async function promptChoice(question, choices) {
 }
 
 // src/client.ts
+var HTTP_STATUS_ERROR = {
+  400: "bad_request",
+  401: "unauthorized",
+  403: "forbidden",
+  404: "not_found",
+  408: "timeout",
+  409: "conflict",
+  413: "artifact_too_large",
+  422: "unprocessable",
+  429: "rate_limited",
+  500: "server_error",
+  502: "bad_gateway",
+  503: "unavailable",
+  504: "gateway_timeout"
+};
+var HTTP_STATUS_HINT = {
+  403: "rejected before reaching the room — check the room URL and token, or an edge proxy/WAF blocking the request (large binary uploads are a common trigger)",
+  413: "file may exceed the room's artifact size limit (25 MB) or the platform request-body limit",
+  429: "rate limited — retry after the indicated delay",
+  502: "upstream/gateway error — the room may be redeploying; retry",
+  503: "service unavailable — the room may be redeploying; retry",
+  504: "gateway timeout — retry"
+};
+
 class MeshClient {
   opts;
   constructor(opts) {
@@ -1746,16 +1805,24 @@ class MeshClient {
   async _err(res) {
     const raw = await res.text().catch(() => "");
     let body = {};
+    let parsed = false;
     try {
-      if (raw)
-        body = JSON.parse(raw);
+      if (raw) {
+        const p = JSON.parse(raw);
+        if (p && typeof p === "object") {
+          body = p;
+          parsed = true;
+        }
+      }
     } catch {}
-    const error = body["error"] ?? "unknown_error";
+    const structuredError = body["error"];
+    const error = structuredError ?? HTTP_STATUS_ERROR[res.status] ?? "unknown_error";
     const statusText = `HTTP ${res.status}${res.statusText ? " " + res.statusText : ""}`;
-    const snippet = raw.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
-    const detail = body["detail"] ?? (error === "unknown_error" ? `${statusText}${snippet ? " — " + snippet : ""}` : res.statusText);
+    const looksMarkup = !parsed && /^\s*<(?:!|\?|[a-zA-Z])/.test(raw);
+    const snippet = looksMarkup ? "non-JSON body (edge/proxy)" : raw.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+    const detail = body["detail"] ?? (structuredError ? res.statusText : `${statusText}${snippet ? " — " + snippet : ""}`);
     const structuredHint = body["hint"] ?? body["tip"];
-    const hint = structuredHint ?? (res.status === 413 ? "file may exceed the room's artifact size limit or the platform request-body limit" : undefined);
+    const hint = structuredHint ?? HTTP_STATUS_HINT[res.status];
     return {
       ok: false,
       error,
@@ -1940,8 +2007,14 @@ class MeshClient {
   async setDefaultAccess(access) {
     return this._postSeq("/config", { default_access: access });
   }
+  async setDefaultAccessSplit(posture) {
+    return this._postSeq("/config", { default_access: posture });
+  }
   async setRateLimit(rateLimit) {
     return this._postSeq("/config", { rate_limit: rateLimit });
+  }
+  async setAuthoritySource(source) {
+    return this._postSeq("/config", { authority_source: source });
   }
   async revokeGrant(subject, path2) {
     return this._postSeq("/grants/revoke", { path_prefix: path2, subject });
@@ -2159,7 +2232,9 @@ var PERF_STYLE = {
   "key.rotate": { label: "rotate", color: C2.blue },
   "decide.request": { label: "ask", color: C2.cyan, bold: true },
   "decide.resolve": { label: "answer", color: C2.brightGreen, bold: true },
-  "system.decision_lapse": { label: "lapsed", color: C2.yellow }
+  "system.decision_lapse": { label: "lapsed", color: C2.yellow },
+  "escalate.ack": { label: "ack", color: C2.green },
+  "system.role_lapse": { label: "lapse", color: C2.yellow }
 };
 function truncate(s, max) {
   return s.length <= max ? s : s.slice(0, max - 1) + "…";
@@ -2195,7 +2270,8 @@ function renderEntry(entry, opts) {
   const bodyWidth = opts.bodyWidth ?? DEFAULT_BODY_WIDTH;
   const bodySnippet = body ? ansi(DIM, `"${truncate(scrubBody(body), bodyWidth)}"`) : "";
   const artStr = artifacts && artifacts.length > 0 ? `  ${ansi(C2.cyan, `→ ${artifacts.map(scrubControl).join(", ")}`)}` : "";
-  return `${seqLabel} ${dateStr}${timeLabel}  ${senderStr}  ${label}  ${taskStr}${bodySnippet}${artStr}`;
+  const ackHint = performative === "escalate" ? `  ${ansi(DIM, `— run: mesh ack ${seq}`)}` : "";
+  return `${seqLabel} ${dateStr}${timeLabel}  ${senderStr}  ${label}  ${taskStr}${bodySnippet}${artStr}${ackHint}`;
 }
 function renderEntries(entries, opts = {}) {
   if (entries.length === 0)
@@ -2236,18 +2312,45 @@ function renderTable(headers, rows) {
   return [fmt(headers), ...rows.map(fmt)].join(`
 `);
 }
+var CONDITION_STALE_AFTER_MS = 300000 * 3;
+function fmtAge(ms) {
+  const totalMinutes = Math.floor(ms / 60000);
+  if (totalMinutes < 1)
+    return "<1m";
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours === 0)
+    return `${minutes}m`;
+  return minutes === 0 ? `${hours}h` : `${hours}h${minutes}m`;
+}
+function conditionWithStaleness(condition, conditionTs, opts = {}) {
+  if (condition === null || condition === undefined || condition === "")
+    return condition;
+  if (conditionTs === null || conditionTs === undefined)
+    return condition;
+  const publishedMs = Date.parse(conditionTs);
+  if (Number.isNaN(publishedMs))
+    return condition;
+  const nowMs = opts.nowMs ?? Date.now();
+  const staleAfterMs = opts.staleAfterMs ?? CONDITION_STALE_AFTER_MS;
+  const ageMs = nowMs - publishedMs;
+  if (ageMs <= staleAfterMs)
+    return condition;
+  return `${condition}? stale ${fmtAge(ageMs)}`;
+}
 function renderRoster(rows) {
   const dash = (s) => s === undefined || s === "" ? "-" : String(s);
   const short = (pk) => pk.replace(/^ed25519-pk:/, "").slice(0, 8);
   return renderTable(["id", "team", "host", "specialties", "last", "cond", "cond@seq", "retired", "pubkey"], rows.map((r) => {
     const specialties = r.specialties ?? r.roles;
+    const cond = conditionWithStaleness(r.condition, r.condition_ts);
     return [
       scrubControl(r.participant_id),
       scrubControl(dash(r.owner_team)),
       scrubControl(dash(r.host)),
       specialties.length ? specialties.map(scrubControl).join(",") : "-",
       dash(r.last_seen_seq),
-      scrubControl(dash(r.condition ?? undefined)),
+      scrubControl(dash(cond ?? undefined)),
       dash(r.condition_seq ?? undefined),
       dash(r.retired_seq ?? undefined),
       short(r.pubkey)
@@ -2283,7 +2386,7 @@ function renderRoleBindings(rows) {
     String(r.depth),
     fmtWindow(r.active_from, r.active_until),
     r.override ? "yes" : "-",
-    dash(r.condition)
+    dash(conditionWithStaleness(r.condition, r.condition_ts))
   ]));
 }
 function renderLeases(rows) {
@@ -2371,6 +2474,15 @@ function workspaceLeaseLines(leases) {
     ...leases.map((l) => `    ${scrubControl(l.path)} — held by ${scrubControl(l.holder)} (expires ${new Date(l.lease_expires).toISOString()})`)
   ];
 }
+function renderBriefTeam(rows) {
+  const dash = (s) => s.length === 0 ? "-" : s;
+  return renderTable(["participant", "roles", "condition", "claimed"], rows.map((r) => [
+    scrubControl(r.participant_id),
+    dash(r.boundRoles.map(scrubControl).join(",")),
+    scrubControl(dash(conditionWithStaleness(r.condition, r.condition_ts) ?? "")),
+    dash(r.claimedRefs.map(scrubControl).join(","))
+  ]));
+}
 var FILE_PLANE_USAGE_NOTE = [
   "file plane — how to touch files:",
   '  put <path>    upload; code auto-merges, conflicts -> local markers (exit 1); prose forks "name (N)"',
@@ -2380,10 +2492,16 @@ var FILE_PLANE_USAGE_NOTE = [
   "  edit <path>   live collaborative co-edit (CRDT prose) — no conflicts, no forks",
   "  lock/rm       lock <path> reserves exclusive write; rm deletes",
   `  conflict rule: code keeps the room's copy + writes local markers; prose/binary fork "name (N)"`,
-  "  exit codes: 0 clean  1 conflicts/forks present  2 hard error"
+  "  exit codes: 0 clean  1 conflicts/forks present  2 hard error",
+  "  doctor        one-step room health check: open escalations, stalled holds, fs conflicts, chain verify (--porcelain for scripts)",
+  "  ack <seq>     mark an open escalation handled (any member; attributed and visible in the record)"
 ];
 function renderBrief(b) {
   const lines = [];
+  if (b.badge != null) {
+    lines.push(scrubControl(b.badge));
+    lines.push("");
+  }
   lines.push(`who i am: ${scrubControl(b.selfId)} in ${scrubControl(b.roomId)}` + (b.roles.length > 0 ? ` (roles: ${b.roles.map(scrubControl).join(", ")})` : " (no bound roles)"));
   lines.push("");
   lines.push("room charter:");
@@ -2415,6 +2533,9 @@ function renderBrief(b) {
     situationLines.push(`  open decisions awaiting your input: ${b.openDecisions.map((d) => `${d.id} (${scrubControl(d.question)})`).join(", ")}`);
   }
   lines.push(...situationLines.length ? situationLines : ["  (nothing open for you right now)"]);
+  lines.push("");
+  lines.push("team:");
+  lines.push(b.team && b.team.length > 0 ? renderBriefTeam(b.team) : "  (no other participants)");
   lines.push("");
   lines.push("workspace:");
   lines.push(`  posture: ${b.workspace.posture}`);
@@ -2966,7 +3087,7 @@ async function fsPutOcc(client, repopath, bytes, baseOverrideRef) {
   }
   const up = await client.putArtifact(hash, bytes);
   if (!up.ok)
-    return { ok: false, kind: "error", error: up.error, detail: up.detail };
+    return { ok: false, kind: "error", error: up.error, detail: up.detail, hint: up.hint, retry_after_s: up.retry_after_s };
   const postData = {
     path: repopath,
     content_hash: "r2:" + hash,
@@ -3005,7 +3126,7 @@ async function fsPutOcc(client, repopath, bytes, baseOverrideRef) {
     const mergedHash = sha256hex(mergedBytes);
     const up2 = await client.putArtifact(mergedHash, mergedBytes);
     if (!up2.ok)
-      return { ok: false, kind: "error", error: up2.error, detail: up2.detail };
+      return { ok: false, kind: "error", error: up2.error, detail: up2.detail, hint: up2.hint, retry_after_s: up2.retry_after_s };
     const r2 = await client.postEntry({
       performative: "file.write",
       data: { path: repopath, content_hash: "r2:" + mergedHash, size: mergedBytes.length, base_hash: tipRef }
@@ -3209,9 +3330,9 @@ var DIM2 = "\x1B[2m";
 var RESET2 = "\x1B[0m";
 
 // src/main.ts
-import { readFileSync as readFileSync6, statSync, readdirSync as readdirSync3 } from "node:fs";
+import { readFileSync as readFileSync7, statSync as statSync2 } from "node:fs";
 import * as os2 from "node:os";
-import { resolve as resolve3, join as join5, dirname as dirname6, sep as sep3 } from "node:path";
+import { resolve as resolve3, join as join6, dirname as dirname6, sep as sep3 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/deps.ts
@@ -8675,13 +8796,36 @@ function isExactPathWatch(predicate, path3) {
   if (predicate.kind !== "entry")
     return false;
   const p = predicate;
-  return p.path === path3 && p.performative === undefined && p.thread === undefined && p.mention_me === undefined && p.participant === undefined;
+  return p.path === path3 && p.performative === undefined && p.thread === undefined && p.mention_me === undefined && p.participant === undefined && p.task_ref === undefined;
 }
 async function subscribePathWatch(client, path3) {
   const result = await client.postWatch({ kind: "entry", path: path3 });
   if (!result.ok)
     return { ok: false, error: result.error, detail: result.detail };
   return { ok: true };
+}
+function isExactTaskStateWatch(predicate, taskRef, to) {
+  return predicate.kind === "task_state" && predicate.task_ref === taskRef && predicate.to === to;
+}
+async function subscribeTaskStateWatch(client, taskRef, to, existing) {
+  try {
+    const watches = existing ?? await client.getWatches();
+    if (watches.some((w) => isExactTaskStateWatch(w.predicate, taskRef, to)))
+      return { ok: true };
+  } catch {}
+  const result = await client.postWatch({ kind: "task_state", task_ref: taskRef, to });
+  if (!result.ok)
+    return { ok: false, error: result.error, detail: result.detail };
+  return { ok: true };
+}
+async function registerDeliverAutoWatch(client, taskRef) {
+  let existing;
+  try {
+    existing = await client.getWatches();
+  } catch {
+    existing = undefined;
+  }
+  return Promise.all(["ANNOUNCED", "DONE"].map((to) => subscribeTaskStateWatch(client, taskRef, to, existing)));
 }
 async function unsubscribePathWatch(client, path3) {
   try {
@@ -9035,16 +9179,40 @@ async function fsCmdConfig(client, args2, _senderId) {
     ok2(`fs config: rate_limit → ${spec} (seq=${r2.seq})`);
     return;
   }
+  if (first === "authority-source") {
+    const value = args2.positional[1];
+    if (value !== "card" && value !== "bindings")
+      die2("fs config: authority-source <card|bindings> is required");
+    const r2 = await client.setAuthoritySource(value);
+    if (!r2.ok)
+      die2(`fs config: [${r2.error}] ${r2.detail}${r2.hint ? " — " + r2.hint : ""}`);
+    ok2(`fs config: authority_source → ${value} (seq=${r2.seq})`);
+    return;
+  }
+  if (first === "write" || first === "discover") {
+    const value = args2.positional[1];
+    if (value !== "open" && value !== "closed")
+      die2(`fs config: ${first} <open|closed> is required`);
+    const grade = value === "open" ? "open" : "closed";
+    const state = await client.getState();
+    const current = normalizeDefaultAccess(state.defaults.default_access);
+    const posture = first === "write" ? { discover: current.discover, write: grade } : { discover: grade, write: current.write };
+    const r2 = await client.setDefaultAccessSplit(posture);
+    if (!r2.ok)
+      die2(`fs config: [${r2.error}] ${r2.detail}${r2.hint ? " — " + r2.hint : ""}`);
+    ok2(`fs config: default_access.${first} → ${value} (seq=${r2.seq})`);
+    return;
+  }
   if (first !== "open" && first !== "closed")
     die2("fs config: <open|closed> is required");
   const r = await client.setDefaultAccess(first);
   if (!r.ok)
     die2(`fs config: [${r.error}] ${r.detail}${r.hint ? " — " + r.hint : ""}`);
-  ok2(`fs config: default_access → ${first} (seq=${r.seq})`);
+  ok2(`fs config: default_access → ${first} (seq=${r.seq}). Tip: "fs config write <open|closed>" / "fs config discover <open|closed>" set one grade independently.`);
 }
 
 // src/ignore.ts
-import { readFileSync as readFileSync4 } from "node:fs";
+import { readFileSync as readFileSync4, readdirSync as readdirSync3 } from "node:fs";
 import { join as join4 } from "node:path";
 function loadMeshignore(root) {
   try {
@@ -9100,6 +9268,22 @@ function meshignoreToTarExcludes(patterns) {
       return p.slice(0, -1);
     return p;
   });
+}
+function walkDirFiles(root, isIgnored) {
+  const out = [];
+  const rec = (dir, rel) => {
+    for (const ent of readdirSync3(dir, { withFileTypes: true })) {
+      const childRel = rel ? `${rel}/${ent.name}` : ent.name;
+      if (isIgnored(childRel))
+        continue;
+      if (ent.isDirectory())
+        rec(join4(dir, ent.name), childRel);
+      else if (ent.isFile())
+        out.push(childRel);
+    }
+  };
+  rec(root, "");
+  return out.sort();
 }
 
 // src/wait-report.ts
@@ -9358,121 +9542,9 @@ var DECIDE_CMDS = {
   show: decideCmdShow
 };
 
-// src/brief.ts
-function flag4(args2, name) {
-  const v = args2.flags[name];
-  return typeof v === "string" ? v : undefined;
-}
-function die4(msg) {
-  process.stderr.write(msg + `
-`);
-  process.exit(1);
-}
-function ok4(msg) {
-  process.stdout.write(msg + `
-`);
-}
-async function readCharterFile(client, path3) {
-  const t = await client.getTree(path3);
-  if (!("tree" in t))
-    return { content: null, tip_seq: null };
-  const node = resolveNode(t.tree, path3);
-  if (!node)
-    return { content: null, tip_seq: null };
-  let hash;
-  try {
-    hash = hashFromRef(node.content_hash);
-  } catch {
-    return { content: null, tip_seq: null };
-  }
-  const blob = await client.getArtifact(hash);
-  if (!(blob instanceof Uint8Array))
-    return { content: null, tip_seq: null };
-  return { content: Buffer.from(blob).toString("utf8"), tip_seq: node.tip_seq };
-}
-async function authorOf(client, seq) {
-  try {
-    const result = await client.getEntries({ since: seq - 1, limit: 1 });
-    const entry = result.entries.find((e) => e.seq === seq);
-    return entry?.submission.sender ?? null;
-  } catch {
-    return null;
-  }
-}
-async function resolveCharterSection(client, path3) {
-  const { content, tip_seq } = await readCharterFile(client, path3);
-  if (content === null)
-    return { path: path3, content: null, tip_seq: null, author: null };
-  const author = await authorOf(client, tip_seq);
-  return { path: path3, content, tip_seq, author };
-}
-async function resolveMyRoles(client, selfId) {
-  try {
-    const rows = await client.listRoles();
-    return Array.isArray(rows) ? myRoles(rows, selfId) : [];
-  } catch {
-    return [];
-  }
-}
-async function resolveMyWriteGrants(client, selfId, roles) {
-  try {
-    const rows = await client.listGrants();
-    if (!Array.isArray(rows))
-      return null;
-    const subjects = new Set([selfId, ...roles.map((r) => `role:${r}`)]);
-    return rows.filter((g) => subjects.has(g.subject) && gte(g.access, "write")).map((g) => ({ path_prefix: g.path_prefix, access: g.access }));
-  } catch {
-    return null;
-  }
-}
-async function resolveActiveLeases(client) {
-  try {
-    const rows = await client.listLeases();
-    if (!Array.isArray(rows))
-      return null;
-    return rows.map((r) => ({ path: r.path, holder: r.holder, lease_expires: r.lease_expires }));
-  } catch {
-    return null;
-  }
-}
-async function resolveWorkspaceSection(client, selfId, roles, posture) {
-  const [writeGrants, leases] = await Promise.all([
-    resolveMyWriteGrants(client, selfId, roles),
-    resolveActiveLeases(client)
-  ]);
-  return { posture, writeGrants, leases };
-}
-function buildBriefInput(state, selfId, roles, roomId, room, roleCharters, workspace) {
-  const duties = computeDuties(state.claims, selfId, roles);
-  const openDecisions = state.decisions.filter((d) => d.status === "open" && (d.authority.includes(`id:${selfId}`) || roles.some((r) => d.authority.includes(`role:${r}`)))).map((d) => ({ id: d.id, question: d.question }));
-  return { selfId, roomId, roles: [...roles], room, roleCharters, duties, openDecisions, workspace };
-}
-async function cmdBrief(args2) {
-  const home = flag4(args2, "home");
-  const roomArg = flag4(args2, "room");
-  const { roomId, entry: room } = resolveRoom(roomArg, home);
-  const identity = loadIdentityWithSecret(home);
-  if (!identity)
-    die4('No identity. Run "mesh keygen" first.');
-  const client = new MeshClient({
-    roomUrl: room.url,
-    token: room.token,
-    senderId: identity.id,
-    roomId,
-    secretBytes: identity.secretBytes
-  });
-  const [state, roles] = await Promise.all([
-    client.getState(),
-    resolveMyRoles(client, identity.id)
-  ]);
-  const [roomSection, roleCharters, workspace] = await Promise.all([
-    resolveCharterSection(client, CHARTER_ROOM_PATH),
-    Promise.all(roles.map((role) => resolveCharterSection(client, charterRolePath(role)))),
-    resolveWorkspaceSection(client, identity.id, roles, state.defaults.default_access ?? "open")
-  ]);
-  const input = buildBriefInput(state, identity.id, roles, roomId, roomSection, roleCharters, workspace);
-  ok4(renderBrief(input));
-}
+// src/doctor.ts
+import { readFileSync as readFileSync6, statSync } from "node:fs";
+import { join as join5 } from "node:path";
 
 // src/sync.ts
 import { writeFileSync as writeFileSync4, existsSync as existsSync3, mkdirSync as mkdirSync5, readFileSync as readFileSync5, unlinkSync } from "node:fs";
@@ -9756,10 +9828,10 @@ async function forkWrite(client, origRepoPath, bytes, taken, maxAttempts = 3) {
       return { ok: false, error: "illegal_fork_path", detail: legal.reason };
     const up = await client.putArtifact(hash, bytes);
     if (!up.ok)
-      return { ok: false, error: up.error, detail: up.detail };
+      return { ok: false, error: up.error, detail: up.detail, hint: up.hint, retry_after_s: up.retry_after_s };
     const r = await client.postEntry({ performative: "file.write", data: { path: candidate, content_hash: "r2:" + hash, size: bytes.length } });
     if (!r.ok)
-      return { ok: false, error: r.error, detail: r.detail };
+      return { ok: false, error: r.error, detail: r.detail, hint: r.hint, retry_after_s: r.retry_after_s };
     const t = await client.getTree(candidate);
     if (!("error" in t)) {
       const node = resolveNode(t.tree, candidate);
@@ -9807,7 +9879,7 @@ async function applyMergeAttempt(ctx, lane) {
   switch (lane) {
     case "binary": {
       const fork = await forkWrite(ctx.client, ctx.repoPath, ctx.localBytes, ctx.knownTaken);
-      return fork.ok ? { kind: "forked", forkPath: fork.forkPath, hash: fork.hash, reason: "binary" } : { kind: "error", error: fork.error, detail: fork.detail };
+      return fork.ok ? { kind: "forked", forkPath: fork.forkPath, hash: fork.hash, reason: "binary" } : { kind: "error", error: fork.error, detail: fork.detail, hint: fork.hint, retry_after_s: fork.retry_after_s };
     }
     case "prose": {
       const merge = await proseMerge(ctx);
@@ -9816,7 +9888,7 @@ async function applyMergeAttempt(ctx, lane) {
       if (merge.kind === "merged")
         return { kind: "merged", hash: merge.hash, pushedBytes: merge.pushedBytes };
       const fork = await forkWrite(ctx.client, ctx.repoPath, ctx.localBytes, ctx.knownTaken);
-      return fork.ok ? { kind: "forked", forkPath: fork.forkPath, hash: fork.hash, reason: "prose" } : { kind: "error", error: fork.error, detail: fork.detail };
+      return fork.ok ? { kind: "forked", forkPath: fork.forkPath, hash: fork.hash, reason: "prose" } : { kind: "error", error: fork.error, detail: fork.detail, hint: fork.hint, retry_after_s: fork.retry_after_s };
     }
     case "code": {
       const r = await fsPutOcc(ctx.client, ctx.repoPath, ctx.localBytes, ctx.sidecar.tip_hash);
@@ -10551,6 +10623,387 @@ function formatGetRowMessage(repoPath, outcome) {
   }
 }
 
+// src/doctor.ts
+function flagBool2(args2, name) {
+  return args2.flags[name] !== undefined;
+}
+function ok4(msg) {
+  process.stdout.write(msg + `
+`);
+}
+function errMsg(e) {
+  return e instanceof Error ? e.message : String(e);
+}
+function computeDoctorReport(input) {
+  const { state, nowMs, workspace, verify: verify2, artifacts } = input;
+  const warnings = [];
+  const escalationRows = [];
+  for (const e of state.escalations) {
+    if (e.status !== "open")
+      continue;
+    escalationRows.push({
+      kind: "escalation",
+      ref: String(e.escalate_seq),
+      detail: e.task_ref ? `${e.reason} (task ${e.task_ref})` : e.reason,
+      hint: `mesh ack ${e.escalate_seq}`
+    });
+  }
+  const stalledRows = [];
+  for (const c of state.claims) {
+    if (!isClaimStalled({ state: c.state, holder: c.holder, max_claim_until: c.max_claim_until != null ? Date.parse(c.max_claim_until) : null }, null, nowMs))
+      continue;
+    stalledRows.push({
+      kind: "stalled",
+      ref: c.task_ref,
+      detail: `holder=${c.holder ?? "?"} max_claim_until=${c.max_claim_until}`
+    });
+  }
+  const decisionRows = [];
+  for (const d of state.decisions) {
+    if (d.status === "lapsed") {
+      decisionRows.push({ kind: "decision", ref: d.id, detail: `lapsed: ${d.question}` });
+    } else if (d.status === "open" && d.deadline != null && Date.parse(d.deadline) <= nowMs) {
+      decisionRows.push({ kind: "decision", ref: d.id, detail: `overdue (deadline ${d.deadline}): ${d.question}` });
+    }
+  }
+  const conditionRows = [];
+  for (const p of state.roster) {
+    if (!p.condition)
+      continue;
+    const withStaleness = conditionWithStaleness(p.condition, p.condition_ts, { nowMs });
+    const isStale = withStaleness !== p.condition;
+    const isGone = p.condition === "gone";
+    if (!isStale && !isGone)
+      continue;
+    conditionRows.push({ kind: "condition", ref: p.participant_id, detail: withStaleness ?? p.condition });
+  }
+  const conflictRows = [];
+  if (workspace.ok) {
+    for (const row of workspace.rows) {
+      if (row.state !== "diverged" && row.overlay !== "conflict-markers")
+        continue;
+      const label = row.overlay ?? row.state;
+      conflictRows.push({ kind: "conflict", ref: row.path, detail: row.detail ? `${label}: ${row.detail}` : label });
+    }
+  } else {
+    warnings.push(`workspace: skipped (${workspace.reason})`);
+  }
+  const verifyRows = [];
+  if (verify2.ok) {
+    if (!verify2.chainOk) {
+      verifyRows.push({ kind: "verify", ref: "chain", detail: `chain verification failed (head seq=${state.head.seq})` });
+    }
+  } else {
+    warnings.push(`verify: skipped (${verify2.reason})`);
+  }
+  const artifactRows = [];
+  if (artifacts.ok) {
+    for (const p of artifacts.probes) {
+      if (p.kind === "missing") {
+        artifactRows.push({
+          kind: "artifact",
+          ref: p.taskRef,
+          detail: `missing artifact r2:${p.hash}`,
+          hint: `re-deliver: mesh deliver ${p.taskRef} --dir <path> | --artifact <ref>`
+        });
+      } else if (p.kind === "error") {
+        warnings.push(`artifact r2:${p.hash} (task ${p.taskRef}): skipped (${p.reason})`);
+      }
+    }
+  } else {
+    warnings.push(`artifacts: skipped (${artifacts.reason})`);
+  }
+  const sections = [
+    { title: "Open escalations", rows: escalationRows },
+    { title: "Stalled holds", rows: stalledRows },
+    { title: "Decisions", rows: decisionRows },
+    { title: "Conditions", rows: conditionRows },
+    { title: "Workspace conflicts", rows: conflictRows },
+    { title: "Chain verify", rows: verifyRows },
+    { title: "Artifacts", rows: artifactRows }
+  ];
+  const problemCount = sections.reduce((n, s) => n + s.rows.length, 0);
+  return { sections, warnings, problemCount, exitCode: problemCount > 0 ? 1 : 0 };
+}
+function formatDoctorPorcelain(report) {
+  return report.sections.flatMap((s) => s.rows.map((r) => `${r.kind}	${r.ref}	${r.detail}`));
+}
+function renderDoctorHuman(report) {
+  const lines = [];
+  for (const section of report.sections) {
+    if (section.rows.length === 0)
+      continue;
+    lines.push(`${section.title}:`);
+    for (const row of section.rows) {
+      lines.push(row.hint ? `  ${row.ref}  ${row.detail}  (${row.hint})` : `  ${row.ref}  ${row.detail}`);
+    }
+  }
+  for (const w of report.warnings)
+    lines.push(`⚠ ${w}`);
+  lines.push(report.problemCount === 0 ? "doctor: all clear" : `doctor: ${report.problemCount} problem(s) found`);
+  return lines;
+}
+async function scanWorkspace(client, root, home) {
+  try {
+    const [treeResult, leasesResult] = await Promise.all([client.getTree(), client.listLeases()]);
+    if ("error" in treeResult)
+      return { ok: false, reason: `[${treeResult.error}] ${treeResult.detail}` };
+    if (!Array.isArray(leasesResult))
+      return { ok: false, reason: `[${leasesResult.error}] ${leasesResult.detail}` };
+    const localAbsByPath = new Map;
+    try {
+      if (statSync(root).isDirectory()) {
+        for (const rel of walkDirFiles(root, makeIgnore(loadMeshignore(root), {}))) {
+          localAbsByPath.set(normalizeId(rel), join5(root, rel));
+        }
+      }
+    } catch {}
+    const local = new Map;
+    for (const [p, abs2] of localAbsByPath) {
+      const bytes = readFileSync6(abs2);
+      const text = isValidUtf8Bytes(new Uint8Array(bytes)) ? bytes.toString("utf8") : undefined;
+      local.set(p, { hash: "r2:" + sha256hex(new Uint8Array(bytes)), text });
+    }
+    const tip = new Map(treeResult.tree.map((n) => [n.path, n]));
+    const lease = new Map(leasesResult.map((l) => [l.path, { holder: l.holder, expiresAtMs: l.lease_expires }]));
+    const sidecarOnlyPaths = listSidecarPaths(client.roomId, home);
+    const baseTipHash = new Map;
+    for (const p of new Set([...local.keys(), ...tip.keys(), ...sidecarOnlyPaths])) {
+      const sidecar = readSidecar(client.roomId, p, home);
+      if (sidecar)
+        baseTipHash.set(p, sidecar.tip_hash);
+    }
+    const rows = composeStatusRows({ local, tip, baseTipHash, lease, sidecarOnlyPaths }, Date.now());
+    return { ok: true, rows };
+  } catch (e) {
+    return { ok: false, reason: errMsg(e) };
+  }
+}
+async function computeVerifyOutcome(client, state) {
+  try {
+    const result = await client.verify(0, state.head.seq);
+    if (!result.ok)
+      return { ok: false, reason: `[${result.error}] ${result.detail}` };
+    return { ok: true, chainOk: result.chain_ok };
+  } catch (e) {
+    return { ok: false, reason: errMsg(e) };
+  }
+}
+async function computeArtifactsOutcome(client, state) {
+  let entries;
+  try {
+    entries = await fetchAllEntries(client);
+  } catch (e) {
+    return { ok: false, reason: errMsg(e) };
+  }
+  const delivered = state.claims.filter((c) => c.state === "DELIVERED" && c.delivered_seq !== undefined).sort((a, b) => b.delivered_seq - a.delivered_seq).slice(0, 10);
+  const entriesBySeq = new Map(entries.map((e) => [e.seq, e]));
+  const probes = [];
+  for (const claim of delivered) {
+    const entry = entriesBySeq.get(claim.delivered_seq);
+    for (const raw of entry?.submission.artifacts ?? []) {
+      const ref = parseArtifactRef(raw);
+      if (ref.kind !== "r2")
+        continue;
+      try {
+        const found = await client.headArtifact(ref.hash);
+        probes.push({ taskRef: claim.task_ref, hash: ref.hash, kind: found ? "ok" : "missing" });
+      } catch (e) {
+        probes.push({ taskRef: claim.task_ref, hash: ref.hash, kind: "error", reason: errMsg(e) });
+      }
+    }
+  }
+  return { ok: true, probes };
+}
+async function runDoctor(client, args2, opts) {
+  let state;
+  try {
+    state = await client.getState();
+  } catch (e) {
+    process.stderr.write(`mesh doctor: ${errMsg(e)}
+`);
+    process.exitCode = 2;
+    return;
+  }
+  const [workspace, verify2, artifacts] = await Promise.all([
+    scanWorkspace(client, opts.root, opts.home),
+    computeVerifyOutcome(client, state),
+    computeArtifactsOutcome(client, state)
+  ]);
+  const report = computeDoctorReport({ state, nowMs: Date.now(), workspace, verify: verify2, artifacts });
+  const lines = flagBool2(args2, "porcelain") ? formatDoctorPorcelain(report) : renderDoctorHuman(report);
+  for (const line of lines)
+    ok4(line);
+  process.exitCode = report.exitCode;
+}
+
+// src/badge.ts
+function composeBadge(counts) {
+  const segments = [];
+  if (counts.unread > 0)
+    segments.push(`unread: ${counts.unread}`);
+  const fsParts = [];
+  if (counts.fsBehind > 0)
+    fsParts.push(`${counts.fsBehind} behind`);
+  if (counts.fsConflict > 0)
+    fsParts.push(`${counts.fsConflict} conflict`);
+  if (fsParts.length > 0)
+    segments.push(`fs: ${fsParts.join(", ")}`);
+  if (counts.openDecisions > 0)
+    segments.push(`${counts.openDecisions} open decisions`);
+  return segments.length > 0 ? segments.join(" · ") : null;
+}
+
+// src/brief.ts
+function flag4(args2, name) {
+  const v = args2.flags[name];
+  return typeof v === "string" ? v : undefined;
+}
+function die4(msg) {
+  process.stderr.write(msg + `
+`);
+  process.exit(1);
+}
+function ok5(msg) {
+  process.stdout.write(msg + `
+`);
+}
+async function readCharterFile(client, path3) {
+  const t = await client.getTree(path3);
+  if (!("tree" in t))
+    return { content: null, tip_seq: null };
+  const node = resolveNode(t.tree, path3);
+  if (!node)
+    return { content: null, tip_seq: null };
+  let hash;
+  try {
+    hash = hashFromRef(node.content_hash);
+  } catch {
+    return { content: null, tip_seq: null };
+  }
+  const blob = await client.getArtifact(hash);
+  if (!(blob instanceof Uint8Array))
+    return { content: null, tip_seq: null };
+  return { content: Buffer.from(blob).toString("utf8"), tip_seq: node.tip_seq };
+}
+async function authorOf(client, seq) {
+  try {
+    const result = await client.getEntries({ since: seq - 1, limit: 1 });
+    const entry = result.entries.find((e) => e.seq === seq);
+    return entry?.submission.sender ?? null;
+  } catch {
+    return null;
+  }
+}
+async function resolveCharterSection(client, path3) {
+  const { content, tip_seq } = await readCharterFile(client, path3);
+  if (content === null)
+    return { path: path3, content: null, tip_seq: null, author: null };
+  const author = await authorOf(client, tip_seq);
+  return { path: path3, content, tip_seq, author };
+}
+async function resolveMyRoles(client, selfId) {
+  try {
+    const rows = await client.listRoles();
+    return Array.isArray(rows) ? myRoles(rows, selfId) : [];
+  } catch {
+    return [];
+  }
+}
+async function resolveMyWriteGrants(client, selfId, roles) {
+  try {
+    const rows = await client.listGrants();
+    if (!Array.isArray(rows))
+      return null;
+    const subjects = new Set([selfId, ...roles.map((r) => `role:${r}`)]);
+    return rows.filter((g) => subjects.has(g.subject) && gte(g.access, "write")).map((g) => ({ path_prefix: g.path_prefix, access: g.access }));
+  } catch {
+    return null;
+  }
+}
+async function resolveActiveLeases(client) {
+  try {
+    const rows = await client.listLeases();
+    if (!Array.isArray(rows))
+      return null;
+    return rows.map((r) => ({ path: r.path, holder: r.holder, lease_expires: r.lease_expires }));
+  } catch {
+    return null;
+  }
+}
+async function resolveWorkspaceSection(client, selfId, roles, posture) {
+  const [writeGrants, leases] = await Promise.all([
+    resolveMyWriteGrants(client, selfId, roles),
+    resolveActiveLeases(client)
+  ]);
+  return { posture, writeGrants, leases };
+}
+function toDutyClaims(claims) {
+  return claims.map((c) => ({
+    task_ref: c.task_ref,
+    state: c.state,
+    holder: c.holder,
+    depends_on: c.depends_on,
+    verdict_by: c.verdict_by,
+    max_claim_until: c.max_claim_until != null ? Date.parse(c.max_claim_until) : undefined
+  }));
+}
+function buildTeamRows(state, selfId) {
+  const bindings = state.bindings ?? [];
+  return state.roster.map((p) => {
+    const claimedRefs = p.participant_id === selfId ? [] : state.claims.filter((c) => c.state === "CLAIMED" && c.holder === p.participant_id).map((c) => c.task_ref);
+    return {
+      participant_id: p.participant_id,
+      boundRoles: myRoles(bindings, p.participant_id),
+      condition: p.condition ?? null,
+      condition_ts: p.condition_ts ?? null,
+      claimedRefs
+    };
+  });
+}
+function buildBriefInput(state, selfId, roles, roomId, room, roleCharters, workspace, nowMs) {
+  const duties = computeDuties(toDutyClaims(state.claims), selfId, roles, nowMs);
+  const openDecisions = decisionsAwaitingAuthority(state.decisions, selfId, roles).map((d) => ({ id: d.id, question: d.question }));
+  const badge = composeBadge({ unread: 0, fsBehind: 0, fsConflict: 0, openDecisions: openDecisions.length });
+  const team = buildTeamRows(state, selfId);
+  return { selfId, roomId, roles: [...roles], room, roleCharters, duties, openDecisions, workspace, badge, team };
+}
+function ownerAuthorityPostureWarning(state, selfId) {
+  const isOwner = state.roster.some((p) => p.joined_seq === 0 && p.participant_id === selfId);
+  const authoritySource = state.defaults.authority_source ?? "card";
+  if (!isOwner || authoritySource !== "card")
+    return "";
+  return `⚠ room is on legacy card authority (self-declared card roles can pass verdicts) — upgrade: mesh fs config authority-source bindings
+
+`;
+}
+async function cmdBrief(args2) {
+  const home = flag4(args2, "home");
+  const roomArg = flag4(args2, "room");
+  const { roomId, entry: room } = resolveRoom(roomArg, home);
+  const identity = loadIdentityWithSecret(home);
+  if (!identity)
+    die4('No identity. Run "mesh keygen" first.');
+  const client = new MeshClient({
+    roomUrl: room.url,
+    token: room.token,
+    senderId: identity.id,
+    roomId,
+    secretBytes: identity.secretBytes
+  });
+  const [state, roles] = await Promise.all([
+    client.getState(),
+    resolveMyRoles(client, identity.id)
+  ]);
+  const [roomSection, roleCharters, workspace] = await Promise.all([
+    resolveCharterSection(client, CHARTER_ROOM_PATH),
+    Promise.all(roles.map((role) => resolveCharterSection(client, charterRolePath(role)))),
+    resolveWorkspaceSection(client, identity.id, roles, normalizeDefaultAccess(state.defaults.default_access).write)
+  ]);
+  const input = buildBriefInput(state, identity.id, roles, roomId, roomSection, roleCharters, workspace, Date.now());
+  ok5(ownerAuthorityPostureWarning(state, identity.id) + renderBrief(input));
+}
+
 // src/main.ts
 function parseArgs(argv) {
   const positional = [];
@@ -10596,7 +11049,7 @@ function flag5(args2, name) {
   const v = args2.flags[name];
   return typeof v === "string" ? v : undefined;
 }
-function flagBool2(args2, name) {
+function flagBool3(args2, name) {
   return args2.flags[name] !== undefined;
 }
 function requiredFlag(args2, name, cmd) {
@@ -10610,7 +11063,7 @@ function die5(msg) {
 `);
   process.exit(1);
 }
-function ok5(msg) {
+function ok6(msg) {
   process.stdout.write(msg + `
 `);
 }
@@ -10622,10 +11075,10 @@ function wantsVersion(argv) {
 }
 function getVersion() {
   if (true)
-    return "1.17.0";
+    return "1.19.0";
   try {
     const here = dirname6(fileURLToPath(import.meta.url));
-    return readFileSync6(resolve3(here, "../../../VERSION"), "utf8").trim();
+    return readFileSync7(resolve3(here, "../../../VERSION"), "utf8").trim();
   } catch {
     return "unknown";
   }
@@ -10640,7 +11093,7 @@ async function hydrateGrepWinners(client, paths, into, roomId, home, onProgress)
   for (const row of result.rows) {
     const line = formatGetRowMessage(row.repoPath, row.outcome);
     if (line)
-      ok5(line);
+      ok6(line);
   }
   return result;
 }
@@ -10649,7 +11102,7 @@ async function hydrateSubtree(client, prefix, into, roomId, home, prune = false,
   for (const row of result.rows) {
     const line = formatGetRowMessage(row.repoPath, row.outcome);
     if (line)
-      ok5(line);
+      ok6(line);
   }
   return result;
 }
@@ -10661,10 +11114,13 @@ function localSizes(paths, into) {
     if (dest !== base && !dest.startsWith(base + sep3))
       continue;
     try {
-      sizes[path3] = statSync(dest).size;
+      sizes[path3] = statSync2(dest).size;
     } catch {}
   }
   return sizes;
+}
+function openDecisionsCount(state, selfId) {
+  return decisionsAwaitingAuthority(state.decisions, selfId, myRoles(state.bindings, selfId)).length;
 }
 async function cmdKeygen(args2) {
   let id2 = flag5(args2, "id");
@@ -10680,19 +11136,19 @@ async function cmdKeygen(args2) {
   const home = flag5(args2, "home");
   const homeDir = home ?? meshHome();
   const existing = loadIdentity(home);
-  if (existing && !flagBool2(args2, "force")) {
+  if (existing && !flagBool3(args2, "force")) {
     die5(`Identity "${existing.id}" already exists at ${homeDir} (pubkey ${existing.pubkey}).
 ` + `Use --force to overwrite — but note this MINTS A NEW KEYPAIR: rooms that bound the old
 ` + `key will reject you with id_taken. To act as a different participant, use a separate MESH_HOME.`);
   }
   const roles = (flag5(args2, "roles") ?? "").split(",").map((r) => r.trim()).filter(Boolean);
   const identity = createIdentity(id2, home, roles);
-  ok5(`Created identity: ${identity.id}`);
-  ok5(`  home:   ${homeDir}`);
-  ok5(`  pubkey: ${identity.pubkey}`);
+  ok6(`Created identity: ${identity.id}`);
+  ok6(`  home:   ${homeDir}`);
+  ok6(`  pubkey: ${identity.pubkey}`);
   if (roles.length > 0)
-    ok5(`  roles:  ${roles.join(", ")}  (asserted in the card at join → verdict authority for these role refs)`);
-  ok5(`To reuse this id elsewhere, COPY ${homeDir}/identity.json — never re-run keygen (that makes a new key).`);
+    ok6(`  roles:  ${roles.join(", ")}  (asserted in the card at join → verdict authority for these role refs)`);
+  ok6(`To reuse this id elsewhere, COPY ${homeDir}/identity.json — never re-run keygen (that makes a new key).`);
 }
 async function cmdKeyRotate(args2) {
   const home = flag5(args2, "home");
@@ -10714,7 +11170,7 @@ async function cmdKeyRotate(args2) {
   if (!result.ok)
     die5(`key rotate failed: [${result.error}] ${result.detail}${result.hint ? " — " + result.hint : ""}`);
   persistOrExplain(rotated, home);
-  ok5(`Rotated key for ${identity.id} (seq=${result.seq}). New pubkey: ${rotated.pubkey}`);
+  ok6(`Rotated key for ${identity.id} (seq=${result.seq}). New pubkey: ${rotated.pubkey}`);
 }
 async function cmdKeyRetire(args2) {
   const home = flag5(args2, "home");
@@ -10740,7 +11196,7 @@ async function cmdKeyRetire(args2) {
   });
   if (!result.ok)
     die5(`key retire failed: [${result.error}] ${result.detail}${result.hint ? " — " + result.hint : ""}`);
-  ok5(`Retired ${identity.id} (seq=${result.seq}). This identity may no longer author entries in ${roomId}.`);
+  ok6(`Retired ${identity.id} (seq=${result.seq}). This identity may no longer author entries in ${roomId}.`);
 }
 async function cmdKey(args2) {
   const sub = args2.positional.shift();
@@ -10795,18 +11251,18 @@ async function cmdCreateRoom(args2) {
   upsertRoom(roomId, { url: result.room_url, token: joined.token, participant_id: joined.participant_id, join_secret: joinSecret }, home);
   setActiveRoom(roomId, home);
   saveConfig({ defaultRoomUrl: workerUrl }, home);
-  ok5(`Room created: ${result.room_url}`);
-  ok5(`Joined as owner: ${joined.participant_id}`);
-  ok5(`Invite:       ${result.invite}`);
-  ok5(`Room pubkey:  ${result.room_pubkey}`);
-  ok5(`
+  ok6(`Room created: ${result.room_url}`);
+  ok6(`Joined as owner: ${joined.participant_id}`);
+  ok6(`Invite:       ${result.invite}`);
+  ok6(`Room pubkey:  ${result.room_pubkey}`);
+  ok6(`
 Share the invite with participants. They run:
   mesh room join ${result.room_url} ${result.invite}`);
 }
 async function cmdInit(args2) {
   if (!process.stdin.isTTY)
     die5("mesh init: requires an interactive terminal (stdin must be a TTY)");
-  ok5(`Welcome to mesh! Let's get you set up.
+  ok6(`Welcome to mesh! Let's get you set up.
 `);
   const profile = await promptLine("Profile name", "default");
   setActiveProfile(profile);
@@ -10823,11 +11279,11 @@ async function cmdInit(args2) {
     if (!roomId)
       die5("init: room id cannot be empty");
     if (!loadIdentity(profileHome)) {
-      ok5(`
+      ok6(`
 Creating identity "${id2}"…`);
       await cmdKeygen({ positional: [], flags: { id: id2, home: profileHome } });
     }
-    ok5(`
+    ok6(`
 Creating room…`);
     await cmdCreateRoom({ positional: [roomId], flags: { owner: id2, url, home: profileHome } });
   } else {
@@ -10836,11 +11292,11 @@ Creating room…`);
     if (!roomUrl || !secret)
       die5("init: room URL and invite secret are required to join");
     if (!loadIdentity(profileHome)) {
-      ok5(`
+      ok6(`
 Creating identity "${id2}"…`);
       await cmdKeygen({ positional: [], flags: { id: id2, home: profileHome } });
     }
-    ok5(`
+    ok6(`
 Joining room…`);
     await cmdJoin({ positional: [roomUrl, secret], flags: { home: profileHome } });
   }
@@ -10864,6 +11320,11 @@ function idTakenHelp(roomId, id2, pubkey, home) {
   ].join(`
 `);
 }
+var JOIN_NEXT_STEPS = [
+  "mesh brief",
+  "mesh inbox",
+  "mesh fs status"
+];
 async function cmdJoin(args2) {
   const roomUrl = args2.positional[0];
   const inviteStr = args2.positional[1];
@@ -10871,7 +11332,7 @@ async function cmdJoin(args2) {
   if (!roomUrl || !inviteStr) {
     die5("join: usage: mesh join <room-url> <room>.<secret>   or   mesh join <room-url> <room> --passphrase <phrase>");
   }
-  if (passphrase === undefined && flagBool2(args2, "passphrase")) {
+  if (passphrase === undefined && flagBool3(args2, "passphrase")) {
     die5("join: --passphrase requires a value, e.g. --passphrase angry-lion");
   }
   const home = flag5(args2, "home");
@@ -10900,8 +11361,12 @@ async function cmdJoin(args2) {
   }
   upsertRoom(roomId, { url: roomUrl, token: result.token, participant_id: result.participant_id }, home);
   setActiveRoom(roomId, home);
-  ok5(`Joined ${roomId} as ${result.participant_id}`);
-  ok5(`Head: seq=${result.head.seq} ${result.head.entry_hash}`);
+  ok6(`Joined ${roomId} as ${result.participant_id}`);
+  ok6(`Head: seq=${result.head.seq} ${result.head.entry_hash}`);
+  ok6("");
+  ok6("next steps:");
+  for (const cmd of JOIN_NEXT_STEPS)
+    ok6(`  ${cmd}`);
 }
 async function cmdRoom(args2) {
   const sub = args2.positional.shift();
@@ -10931,15 +11396,15 @@ async function cmdRoomList(args2) {
   const rooms = loadRooms(home);
   const ids = Object.keys(rooms);
   if (ids.length === 0) {
-    ok5('No rooms joined. Run "mesh room join" first.');
+    ok6('No rooms joined. Run "mesh room join" first.');
     return;
   }
   const active = getActiveRoom(home);
-  ok5(`Joined rooms (${ids.length})${active ? `, active: ${active}` : ""}:`);
+  ok6(`Joined rooms (${ids.length})${active ? `, active: ${active}` : ""}:`);
   for (const id2 of ids) {
     const r = rooms[id2];
     const mark = id2 === active ? "*" : " ";
-    ok5(`${mark} ${id2}  —  as ${r.participant_id}  —  ${r.url}`);
+    ok6(`${mark} ${id2}  —  as ${r.participant_id}  —  ${r.url}`);
   }
 }
 async function cmdRoomRm(args2) {
@@ -10949,7 +11414,7 @@ async function cmdRoomRm(args2) {
   const home = flag5(args2, "home");
   if (!removeRoom(roomId, home))
     die5(`room rm: "${roomId}" not in rooms.json`);
-  ok5(`Forgot room ${roomId} locally (rooms.json). This does not delete the room on the server.`);
+  ok6(`Forgot room ${roomId} locally (rooms.json). This does not delete the room on the server.`);
 }
 async function cmdRoomDelete(args2) {
   const roomId = args2.positional[0];
@@ -10976,7 +11441,7 @@ async function cmdRoomDelete(args2) {
     die5(`room delete failed: ${result.error} (HTTP ${result.status})`);
   }
   removeRoom(roomId, home);
-  ok5(`Deleted room "${roomId}" on the server and forgot it locally. Re-create the id to reuse it.`);
+  ok6(`Deleted room "${roomId}" on the server and forgot it locally. Re-create the id to reuse it.`);
 }
 function extractInviteSecret(invite, roomId) {
   return invite.startsWith(roomId + ".") ? invite.slice(roomId.length + 1) : invite;
@@ -11122,10 +11587,10 @@ function generatePassphrase() {
 async function cmdRoomInvite(args2) {
   const roomId = args2.positional[0];
   const home = flag5(args2, "home");
-  const showFlag = flagBool2(args2, "show");
-  const rotateFlag = flagBool2(args2, "rotate");
+  const showFlag = flagBool3(args2, "show");
+  const rotateFlag = flagBool3(args2, "rotate");
   const forId = flag5(args2, "for");
-  const listFlag = flagBool2(args2, "list");
+  const listFlag = flagBool3(args2, "list");
   const revokeId = flag5(args2, "revoke");
   if (!showFlag && !rotateFlag && !forId && !listFlag && !revokeId) {
     die5("room invite: use --show | --rotate | --for <participant-id> [--passphrase <phrase>] [--ttl <seconds>] | --list | --revoke <participant-id>");
@@ -11138,7 +11603,7 @@ async function cmdRoomInvite(args2) {
     if (!room.join_secret) {
       die5(`room invite --show: no local join_secret for "${resolvedId}" (only the room creator has it; the room never stores plaintext)`);
     }
-    ok5(`${resolvedId}.${room.join_secret}`);
+    ok6(`${resolvedId}.${room.join_secret}`);
     return;
   }
   const client = new MeshClient({
@@ -11157,8 +11622,8 @@ async function cmdRoomInvite(args2) {
     }
     const newSecret = extractInviteSecret(result.invite, resolvedId);
     upsertRoom(resolvedId, { ...room, join_secret: newSecret }, home);
-    ok5(`New invite: ${result.invite}`);
-    ok5(`Share with participants: mesh room join ${room.url} ${result.invite}`);
+    ok6(`New invite: ${result.invite}`);
+    ok6(`Share with participants: mesh room join ${room.url} ${result.invite}`);
   } else if (forId) {
     const passphrase = flag5(args2, "passphrase") ?? generatePassphrase();
     const ttlRaw = flag5(args2, "ttl");
@@ -11172,11 +11637,11 @@ async function cmdRoomInvite(args2) {
       die5(`room invite --for failed: [${result.error}] ${result.detail}`);
     }
     const mins = Math.round((result.expires - Date.now()) / 60000);
-    ok5(`Passphrase invite for "${forId}": ${passphrase}`);
-    ok5(`Single-use, expires in ~${mins} min. Share the phrase out-of-band; they run:`);
-    ok5(`  mesh keygen --id "${forId}"   (if they have no identity yet)`);
-    ok5(`  mesh room join ${room.url} ${resolvedId} --passphrase ${passphrase}`);
-    ok5(`Note: the phrase only admits an agent whose identity id is exactly "${forId}".`);
+    ok6(`Passphrase invite for "${forId}": ${passphrase}`);
+    ok6(`Single-use, expires in ~${mins} min. Share the phrase out-of-band; they run:`);
+    ok6(`  mesh keygen --id "${forId}"   (if they have no identity yet)`);
+    ok6(`  mesh room join ${room.url} ${resolvedId} --passphrase ${passphrase}`);
+    ok6(`Note: the phrase only admits an agent whose identity id is exactly "${forId}".`);
   } else if (listFlag) {
     const result = await client.listPassphraseInvites();
     if (!result.ok) {
@@ -11185,13 +11650,13 @@ async function cmdRoomInvite(args2) {
       die5(`room invite --list failed: [${result.error}] ${result.detail}`);
     }
     if (result.invites.length === 0) {
-      ok5("No pending passphrase invites.");
+      ok6("No pending passphrase invites.");
       return;
     }
-    ok5(`Pending passphrase invites (${result.invites.length}):`);
+    ok6(`Pending passphrase invites (${result.invites.length}):`);
     for (const inv of result.invites) {
       const mins = Math.max(0, Math.round((inv.expires - Date.now()) / 60000));
-      ok5(`  ${inv.participant_id}  —  expires in ~${mins} min${inv.attempts > 0 ? `  —  ${inv.attempts} failed attempt(s)` : ""}`);
+      ok6(`  ${inv.participant_id}  —  expires in ~${mins} min${inv.attempts > 0 ? `  —  ${inv.attempts} failed attempt(s)` : ""}`);
     }
   } else if (revokeId) {
     const result = await client.revokePassphraseInvite(revokeId);
@@ -11202,7 +11667,7 @@ async function cmdRoomInvite(args2) {
         die5(`room invite --revoke: only the room owner may revoke invites for "${resolvedId}".`);
       die5(`room invite --revoke failed: [${result.error}] ${result.detail}`);
     }
-    ok5(`Revoked pending invite for "${revokeId}".`);
+    ok6(`Revoked pending invite for "${revokeId}".`);
   }
 }
 function isFilePlaneEntry(performative) {
@@ -11212,7 +11677,7 @@ function flagOutOfScope(closure, canRead) {
   return closure.map((path3) => ({ path: path3, readable: canRead(path3) }));
 }
 async function cmdLog(args2) {
-  const follow = flagBool2(args2, "f");
+  const follow = flagBool3(args2, "f");
   const home = flag5(args2, "home");
   const roomArg = flag5(args2, "room");
   const { entry: room } = resolveRoom(roomArg, home);
@@ -11220,7 +11685,7 @@ async function cmdLog(args2) {
   if (!identity)
     die5('No identity. Run "mesh keygen" first.');
   const roomIdFromUrl = room.url.split("/").pop() ?? "unknown";
-  ok5(ansi(DIM, `room: ${roomIdFromUrl}`));
+  ok6(ansi(DIM, `room: ${roomIdFromUrl}`));
   const client = new MeshClient({
     roomUrl: room.url,
     token: room.token,
@@ -11229,9 +11694,12 @@ async function cmdLog(args2) {
     secretBytes: identity.secretBytes
   });
   if (follow) {
-    const { entries, head } = await client.getEntries({ limit: 100 });
+    const [{ entries, head }, state] = await Promise.all([
+      client.getEntries({ limit: 100 }),
+      client.getState().catch(() => null)
+    ]);
     if (entries.length > 0)
-      ok5(renderEntries(entries));
+      ok6(renderEntries(entries));
     let senderWidth;
     if (entries.length > 0) {
       const widths = entries.map((e) => e.submission.sender.length);
@@ -11239,11 +11707,12 @@ async function cmdLog(args2) {
     }
     let since = head.seq;
     const tty = process.stdout.isTTY ?? false;
-    const footer = ansi(DIM, "— streaming (Ctrl+C to exit) —");
+    const badge = state !== null ? composeBadge({ unread: 0, fsBehind: 0, fsConflict: 0, openDecisions: openDecisionsCount(state, identity.id) }) : null;
+    const footer = ansi(DIM, `— streaming (Ctrl+C to exit) —${badge !== null ? "  " + badge : ""}`);
     if (tty)
       process.stdout.write(footer);
     else
-      ok5(footer);
+      ok6(footer);
     for await (const frame of client.follow(since)) {
       if (frame.type === "entry") {
         if (senderWidth === undefined) {
@@ -11253,7 +11722,7 @@ async function cmdLog(args2) {
         if (tty)
           printAboveFooter(line, footer);
         else
-          ok5(line);
+          ok6(line);
         since = frame.entry.seq;
       }
     }
@@ -11263,11 +11732,11 @@ async function cmdLog(args2) {
   } else {
     const { entries, head } = await client.getEntries({ limit: 200 });
     if (entries.length === 0) {
-      ok5("(no entries)");
+      ok6("(no entries)");
     } else {
-      ok5(renderEntries(entries));
+      ok6(renderEntries(entries));
     }
-    ok5(renderStateHeader(head));
+    ok6(renderStateHeader(head));
   }
 }
 async function cmdChat(args2) {
@@ -11285,9 +11754,12 @@ async function cmdChat(args2) {
     roomId: roomIdFromUrl,
     secretBytes: identity.secretBytes
   });
-  const { entries, head } = await client.getEntries({ limit: 50 });
+  const [{ entries, head }, state] = await Promise.all([
+    client.getEntries({ limit: 50 }),
+    client.getState().catch(() => null)
+  ]);
   if (entries.length > 0)
-    ok5(renderEntries(entries));
+    ok6(renderEntries(entries));
   const widths = entries.map((e) => e.submission.sender.length);
   let senderWidth = widths.length > 0 ? Math.min(28, Math.max(12, Math.max(...widths))) : undefined;
   let since = head.seq;
@@ -11296,9 +11768,10 @@ async function cmdChat(args2) {
     inputExit = resolve4;
   });
   const ac = new AbortController;
+  const badge = state !== null ? composeBadge({ unread: 0, fsBehind: 0, fsConflict: 0, openDecisions: openDecisionsCount(state, identity.id) }) : null;
   const input = startChatInput({
     prompt: "> ",
-    status: ansi(DIM, `— chat as ${identity.id} in ${roomIdFromUrl} (Ctrl+D to exit) —`),
+    status: ansi(DIM, `— chat as ${identity.id} in ${roomIdFromUrl} (Ctrl+D to exit) —${badge !== null ? "  " + badge : ""}`),
     onSubmit: async (line) => {
       const text = line.trim();
       if (!text)
@@ -11358,7 +11831,7 @@ async function cmdPost(args2) {
   const result = await client.postEntry(input);
   if (!result.ok)
     die5(`post failed: [${result.error}] ${result.detail}`);
-  ok5(`Posted seq=${result.seq}`);
+  ok6(`Posted seq=${result.seq}`);
 }
 async function cmdAnnounce(args2) {
   const taskRef = args2.positional[0];
@@ -11397,7 +11870,7 @@ async function cmdAnnounce(args2) {
   const result = await client.postEntry({ performative: "announce", task_ref: taskRef, body, data });
   if (!result.ok)
     die5(`announce failed: [${result.error}] ${result.detail}`);
-  ok5(`Announced ${taskRef} (seq=${result.seq})`);
+  ok6(`Announced ${taskRef} (seq=${result.seq})`);
 }
 async function simpleTaskCmd(performative, args2, requireBody = false) {
   const taskRef = args2.positional[0];
@@ -11428,31 +11901,22 @@ async function simpleTaskCmd(performative, args2, requireBody = false) {
   const result = await client.postEntry(input);
   if (!result.ok)
     die5(`${performative} failed: [${result.error}] ${result.detail}${result.hint ? " — " + result.hint : ""}`);
-  ok5(`${performative} ${taskRef} (seq=${result.seq})`);
+  ok6(`${performative} ${taskRef} (seq=${result.seq})`);
 }
-function resolveDeliverMode(a) {
-  if (a.dir && a.artifact)
-    throw new Error("deliver: --dir and --artifact are mutually exclusive");
-  if (a.dir)
-    return { mode: "dir", dir: a.dir };
-  if (a.artifact)
-    return { mode: "ref", artifacts: a.artifact.split(",").map((s) => s.trim()) };
-  throw new Error("deliver: provide --dir <path> or --artifact <ref>");
+async function runAck(client, args2) {
+  const seqArg = args2.positional[0];
+  const escalateSeq = seqArg !== undefined ? Number(seqArg) : NaN;
+  if (!Number.isInteger(escalateSeq) || escalateSeq < 0)
+    die5("ack: <escalate_seq> (a room entry seq) is required");
+  const result = await client.postEntry({
+    performative: "escalate.ack",
+    data: { escalate_seq: escalateSeq }
+  });
+  if (!result.ok)
+    die5(`ack failed: [${result.error}] ${result.detail}${result.hint ? " — " + result.hint : ""}`);
+  ok6(`acked escalation ${escalateSeq} (seq=${result.seq})`);
 }
-async function cmdDeliver(args2) {
-  if (!args2.positional[0])
-    die5("deliver: <task_ref> is required");
-  let m;
-  try {
-    m = resolveDeliverMode({ dir: flag5(args2, "dir"), artifact: flag5(args2, "artifact") });
-  } catch (err2) {
-    die5(err2 instanceof Error ? err2.message : String(err2));
-  }
-  if (m.mode === "ref") {
-    return simpleTaskCmd("deliver", args2);
-  }
-  const taskRef = args2.positional[0];
-  const body = flag5(args2, "body");
+async function cmdAck(args2) {
   const home = flag5(args2, "home");
   const roomArg = flag5(args2, "room");
   const { roomId, entry: room } = resolveRoom(roomArg, home);
@@ -11466,20 +11930,72 @@ async function cmdDeliver(args2) {
     roomId,
     secretBytes: identity.secretBytes
   });
-  const excludes = [".git", ".meshignore", ...meshignoreToTarExcludes(loadMeshignore(m.dir))];
-  const { bytes, hash, size: size2 } = await packDir(m.dir, { exclude: excludes });
-  const put = await client.putArtifact(hash, bytes);
-  if (!put.ok)
-    die5(`deliver: artifact upload failed: [${put.error}] ${put.detail}`);
+  await runAck(client, args2);
+}
+function resolveDeliverMode(a) {
+  if (a.dir && a.artifact)
+    throw new Error("deliver: --dir and --artifact are mutually exclusive");
+  if (a.dir)
+    return { mode: "dir", dir: a.dir };
+  if (a.artifact)
+    return { mode: "ref", artifacts: a.artifact.split(",").map((s) => s.trim()) };
+  throw new Error("deliver: provide --dir <path> or --artifact <ref>");
+}
+async function runDeliver(client, args2) {
+  const taskRef = args2.positional[0];
+  if (!taskRef)
+    die5("deliver: <task_ref> is required");
+  let m;
+  try {
+    m = resolveDeliverMode({ dir: flag5(args2, "dir"), artifact: flag5(args2, "artifact") });
+  } catch (err2) {
+    die5(err2 instanceof Error ? err2.message : String(err2));
+  }
+  const body = flag5(args2, "body");
+  let artifacts;
+  let uploadNote = "";
+  if (m.mode === "dir") {
+    const excludes = [".git", ".meshignore", ...meshignoreToTarExcludes(loadMeshignore(m.dir))];
+    const { bytes, hash, size: size2 } = await packDir(m.dir, { exclude: excludes });
+    const put = await client.putArtifact(hash, bytes);
+    if (!put.ok)
+      die5(`deliver: artifact upload failed: [${put.error}] ${put.detail}`);
+    artifacts = ["r2:" + hash];
+    uploadNote = `  artifact r2:${hash}  (${size2} bytes, ${put.deduped ? "deduped" : "uploaded"})`;
+  } else {
+    artifacts = m.artifacts;
+  }
   const r = await client.postEntry({
     performative: "deliver",
     task_ref: taskRef,
-    artifacts: ["r2:" + hash],
+    artifacts,
     ...body ? { body } : {}
   });
   if (!r.ok)
     die5(`deliver failed: [${r.error}] ${r.detail}${r.hint ? " — " + r.hint : ""}`);
-  ok5(`delivered ${taskRef} (seq=${r.seq})  artifact r2:${hash}  (${size2} bytes, ${put.deduped ? "deduped" : "uploaded"})`);
+  ok6(m.mode === "dir" ? `delivered ${taskRef} (seq=${r.seq})${uploadNote}` : `deliver ${taskRef} (seq=${r.seq})`);
+  const watchOutcomes = await registerDeliverAutoWatch(client, taskRef);
+  for (const outcome of watchOutcomes) {
+    if (!outcome.ok) {
+      ok6(`deliver: warning — watch registration failed [${outcome.error}] ${outcome.detail} — you will not be notified of the verdict`);
+    }
+  }
+}
+async function cmdDeliver(args2) {
+  const home = flag5(args2, "home");
+  const roomArg = flag5(args2, "room");
+  const { roomId, entry: room } = resolveRoom(roomArg, home);
+  const identity = loadIdentityWithSecret(home);
+  if (!identity)
+    die5('No identity. Run "mesh keygen" first.');
+  const client = new MeshClient({
+    roomUrl: room.url,
+    token: room.token,
+    senderId: identity.id,
+    roomId,
+    secretBytes: identity.secretBytes
+  });
+  await runDeliver(client, args2);
 }
 function resolveFetchRef(arg, entries) {
   if (arg.startsWith("r2:"))
@@ -11529,16 +12045,16 @@ async function cmdFetch(args2) {
     die5(err2 instanceof Error ? err2.message : String(err2));
   }
   if (ref.kind === "other") {
-    ok5(`Artifact is not an R2 tarball: ${ref.raw} (fetch it manually)`);
+    ok6(`Artifact is not an R2 tarball: ${ref.raw} (fetch it manually)`);
     return;
   }
   const bytes = await client.getArtifact(ref.hash);
   if (!(bytes instanceof Uint8Array))
     die5(`fetch: [${bytes.error}] ${bytes.detail}${bytes.hint ? " — " + bytes.hint : ""}`);
   const name = arg.startsWith("r2:") ? ref.hash : arg;
-  const dest = resolve3(flag5(args2, "into") ?? join5(home ?? meshHome(), "artifacts", name));
+  const dest = resolve3(flag5(args2, "into") ?? join6(home ?? meshHome(), "artifacts", name));
   await unpackInto(bytes, dest);
-  ok5(`Extracted to ${dest}`);
+  ok6(`Extracted to ${dest}`);
 }
 var REFETCH_DEBOUNCE_MS = 300;
 var TICK_MS = 5000;
@@ -11582,22 +12098,6 @@ async function followFilePlane(client, since, onLine) {
     }
   }
 }
-function walkDirFiles(root, isIgnored) {
-  const out = [];
-  const rec = (dir, rel) => {
-    for (const ent of readdirSync3(dir, { withFileTypes: true })) {
-      const childRel = rel ? `${rel}/${ent.name}` : ent.name;
-      if (isIgnored(childRel))
-        continue;
-      if (ent.isDirectory())
-        rec(join5(dir, ent.name), childRel);
-      else if (ent.isFile())
-        out.push(childRel);
-    }
-  };
-  rec(root, "");
-  return out.sort();
-}
 function makeRateRetry(onWait) {
   return async (attempt, isRateLimited, retryAfterS) => {
     let r = await attempt();
@@ -11628,14 +12128,14 @@ async function statusScan(client, opts) {
     die5(`fs status: [${treeResult.error}] ${treeResult.detail}`);
   if (!Array.isArray(leasesResult))
     die5(`fs status: [${leasesResult.error}] ${leasesResult.detail}`);
-  const scanDir = normPrefix ? join5(root, normPrefix) : root;
+  const scanDir = normPrefix ? join6(root, normPrefix) : root;
   const localAbsByPath = new Map;
   try {
-    const st = statSync(scanDir);
+    const st = statSync2(scanDir);
     if (st.isDirectory()) {
       for (const rel of walkDirFiles(scanDir, makeIgnore(loadMeshignore(scanDir), {}))) {
         const repoPath = normalizeId([normPrefix, rel].filter((s) => s.length > 0).join("/"));
-        localAbsByPath.set(repoPath, join5(scanDir, rel));
+        localAbsByPath.set(repoPath, join6(scanDir, rel));
       }
     } else if (st.isFile() && normPrefix) {
       localAbsByPath.set(normPrefix, scanDir);
@@ -11643,7 +12143,7 @@ async function statusScan(client, opts) {
   } catch {}
   const local = new Map;
   for (const [p, abs2] of localAbsByPath) {
-    const bytes = readFileSync6(abs2);
+    const bytes = readFileSync7(abs2);
     const text = isValidUtf8Bytes(new Uint8Array(bytes)) ? bytes.toString("utf8") : undefined;
     local.set(p, { hash: "r2:" + sha256hex(new Uint8Array(bytes)), text });
   }
@@ -11666,7 +12166,7 @@ async function statusScan(client, opts) {
       const sidecar = readSidecar(client.roomId, row.path, home);
       if (!localAbs || !node?.content_hash || !sidecar || sidecar.content === undefined)
         continue;
-      const localBytes = readFileSync6(localAbs);
+      const localBytes = readFileSync7(localAbs);
       if (!isValidUtf8Bytes(new Uint8Array(localBytes)))
         continue;
       let hash;
@@ -11691,37 +12191,37 @@ var FS_CMDS = {
       die5("fs put: <path> is required");
     let isDir = false, exists = true;
     try {
-      isDir = statSync(localPath).isDirectory();
+      isDir = statSync2(localPath).isDirectory();
     } catch {
       exists = false;
     }
     if (!exists)
       die5(`fs put: no such file or directory: ${localPath}`);
     const home = flag5(args2, "home");
-    const strict = flagBool2(args2, "strict");
+    const strict = flagBool3(args2, "strict");
     let targets;
     let treePrefix;
     let batchLabel;
     if (isDir) {
       const prefix = (flag5(args2, "as") ?? localPath).replace(/\\/g, "/").split("/").filter((s) => s.length > 0 && s !== ".").join("/");
-      const isIgnored = makeIgnore(loadMeshignore(localPath), { includeHidden: flagBool2(args2, "all") });
+      const isIgnored = makeIgnore(loadMeshignore(localPath), { includeHidden: flagBool3(args2, "all") });
       const rels = walkDirFiles(localPath, isIgnored);
       if (rels.length === 0)
         die5(`fs put: ${localPath} has no eligible files (hidden entries skipped unless --all; .meshignore patterns applied)`);
       targets = rels.map((rel) => ({
         repoPath: [prefix, rel].filter((s) => s.length > 0).join("/"),
-        localAbs: join5(localPath, rel),
-        localBytes: new Uint8Array(readFileSync6(join5(localPath, rel)))
+        localAbs: join6(localPath, rel),
+        localBytes: new Uint8Array(readFileSync7(join6(localPath, rel)))
       }));
       treePrefix = prefix;
       batchLabel = `${rels.length} file(s) from ${localPath}/ → ${prefix || "(room root)"}`;
     } else {
       const as = flag5(args2, "as") ?? localPath;
-      targets = [{ repoPath: as, localAbs: localPath, localBytes: new Uint8Array(readFileSync6(localPath)) }];
+      targets = [{ repoPath: as, localAbs: localPath, localBytes: new Uint8Array(readFileSync7(localPath)) }];
       treePrefix = as;
       batchLabel = as;
     }
-    const json = flagBool2(args2, "json");
+    const json = flagBool3(args2, "json");
     const mode = resolveMode(json, process.stderr.isTTY ?? false);
     let rateLimit;
     try {
@@ -11736,7 +12236,7 @@ var FS_CMDS = {
       selfId: senderId,
       strict,
       treePrefix,
-      stopOnError: flagBool2(args2, "stop-on-error"),
+      stopOnError: flagBool3(args2, "stop-on-error"),
       retry: makeRateRetry(reporter.onWait),
       onProgress: reporter.sink
     });
@@ -11744,10 +12244,10 @@ var FS_CMDS = {
       process.exitCode = result.exitCode;
       return;
     }
-    const verbose = flagBool2(args2, "verbose") || flagBool2(args2, "v");
+    const verbose = flagBool3(args2, "verbose") || flagBool3(args2, "v");
     for (const row of result.rows) {
       if (verbose || putRowNeedsAttention(row.outcome))
-        ok5(formatPutRowMessage(row.repoPath, row.outcome));
+        ok6(formatPutRowMessage(row.repoPath, row.outcome));
     }
     if (result.hardError && result.rows.length === 0) {
       const e = result.hardError;
@@ -11757,27 +12257,27 @@ var FS_CMDS = {
       return;
     }
     const summary = summarizePutRows(result.rows);
-    ok5(`fs put ${result.stopped ? "stopped early" : "done"}: ${formatPutSummary(batchLabel, summary)}  [exit ${result.exitCode}]`);
+    ok6(`fs put ${result.stopped ? "stopped early" : "done"}: ${formatPutSummary(batchLabel, summary)}  [exit ${result.exitCode}]`);
     if (result.stopped) {
       const done = result.rows.length, total = targets.length;
       const where = result.hardError ? "see the cause below" : "see the flagged rows above";
-      ok5(`  aborted at ${done}/${total} files — ${total - done} not attempted (${where}, resolve, then re-run to resume${flagBool2(args2, "stop-on-error") ? "; or drop --stop-on-error to skip failures and continue" : ""})`);
+      ok6(`  aborted at ${done}/${total} files — ${total - done} not attempted (${where}, resolve, then re-run to resume${flagBool3(args2, "stop-on-error") ? "; or drop --stop-on-error to skip failures and continue" : ""})`);
     }
     if (result.hardError) {
       const e = result.hardError;
       process.stderr.write(`  cause: [${e.error}]${e.detail ? " " + e.detail : ""}${e.hint ? " — " + e.hint : ""}
 `);
     } else if (summary.errors > 0) {
-      ok5(`  ${summary.errors} file(s) failed and were skipped (rows above); re-run to retry, or --stop-on-error to abort on the first failure`);
+      ok6(`  ${summary.errors} file(s) failed and were skipped (rows above); re-run to retry, or --stop-on-error to abort on the first failure`);
     }
     if (result.informed)
-      ok5("  conflicts/forks/resurrections signaled (see 'mesh fs status')");
-    ok5(`verify: mesh fs status${treePrefix ? " " + treePrefix : ""}${verbose ? "" : "   (--verbose for the full per-file list)"}`);
+      ok6("  conflicts/forks/resurrections signaled (see 'mesh fs status')");
+    ok6(`verify: mesh fs status${treePrefix ? " " + treePrefix : ""}${verbose ? "" : "   (--verbose for the full per-file list)"}`);
     process.exitCode = result.exitCode;
   },
   ls: async (client, args2) => {
     const prefix = args2.positional[0];
-    const follow = flagBool2(args2, "f");
+    const follow = flagBool3(args2, "f");
     const into = resolveWorkspaceRoot(flag5(args2, "into"), flag5(args2, "root"));
     const [treeResult, leasesResult, state] = await Promise.all([
       client.getTree(prefix),
@@ -11791,7 +12291,7 @@ var FS_CMDS = {
     let rows = treeResult.tree;
     let leases = leasesResult;
     let cachedLocalSizes = localSizes(rows.map((r) => r.path), into);
-    const posture = state.defaults.default_access ?? "open";
+    const posture = normalizeDefaultAccess(state.defaults.default_access).write;
     const render = (recent = []) => renderWorkspace({
       roomId: client.roomId,
       posture,
@@ -11803,7 +12303,7 @@ var FS_CMDS = {
       now: Date.now(),
       recent
     });
-    ok5(render());
+    ok6(render());
     if (!follow)
       return;
     const refetch = async () => {
@@ -11828,7 +12328,7 @@ var FS_CMDS = {
       const recentLines = [];
       const redraw = () => {
         process.stdout.write("\x1B[2J\x1B[H");
-        ok5(render(recentLines));
+        ok6(render(recentLines));
       };
       let refetchPending = false;
       let debounceTimer;
@@ -11855,9 +12355,9 @@ var FS_CMDS = {
       }
     } else {
       const footer = ansi(DIM, "— streaming fs entries (Ctrl+C to exit) —");
-      ok5(footer);
+      ok6(footer);
       await followFilePlane(client, since, (line) => {
-        ok5(line);
+        ok6(line);
       });
     }
   },
@@ -11867,8 +12367,8 @@ var FS_CMDS = {
       die5("fs get: <repopath> is required");
     const into = resolveWorkspaceRoot(flag5(args2, "into"), flag5(args2, "root"));
     const home = flag5(args2, "home");
-    const prune = flagBool2(args2, "prune");
-    const json = flagBool2(args2, "json");
+    const prune = flagBool3(args2, "prune");
+    const json = flagBool3(args2, "json");
     const reporter = createReporter({ mode: resolveMode(json, process.stderr.isTTY ?? false) });
     const result = await runGetBatch(client, {
       roomId: client.roomId,
@@ -11899,22 +12399,22 @@ var FS_CMDS = {
     for (const row of result.rows) {
       const line = formatGetRowMessage(row.repoPath, row.outcome);
       if (line) {
-        ok5(line);
+        ok6(line);
         printed = true;
       }
     }
     if (!printed) {
-      ok5(result.rows.length > 1 ? `  ${repopath} (${result.rows.length} file(s), all in sync)` : `  ${repopath} (unchanged)`);
+      ok6(result.rows.length > 1 ? `  ${repopath} (${result.rows.length} file(s), all in sync)` : `  ${repopath} (unchanged)`);
     }
     if (result.rows.some((r) => getRowNeedsVerify(r.outcome)))
-      ok5(`verify: mesh fs status ${repopath}`);
+      ok6(`verify: mesh fs status ${repopath}`);
     process.exitCode = result.exitCode;
   },
   rm: async (client, args2) => {
     const repopath = args2.positional[0];
     if (!repopath)
       die5("fs rm: <repopath> is required");
-    if (flagBool2(args2, "r") || flagBool2(args2, "recursive")) {
+    if (flagBool3(args2, "r") || flagBool3(args2, "recursive")) {
       const t = await client.getTree(repopath);
       if ("error" in t)
         die5(`fs rm: [${t.error}] ${t.detail}`);
@@ -11926,15 +12426,15 @@ var FS_CMDS = {
         const r2 = await withRateRetry(() => client.postEntry({ performative: "file.delete", data: { path: n.path } }), (x) => !x.ok && x.error === "rate_limited", (x) => !x.ok ? x.retry_after_s : undefined);
         if (!r2.ok)
           die5(`fs rm: ${n.path}: [${r2.error}] ${r2.detail}${r2.hint ? " — " + r2.hint : ""}`);
-        ok5(`  rm ${n.path}`);
+        ok6(`  rm ${n.path}`);
       }
-      ok5(`fs rm: ${targets.length} file(s) under ${norm}`);
+      ok6(`fs rm: ${targets.length} file(s) under ${norm}`);
       return;
     }
     const r = await withRateRetry(() => client.postEntry({ performative: "file.delete", data: { path: repopath } }), (x) => !x.ok && x.error === "rate_limited", (x) => !x.ok ? x.retry_after_s : undefined);
     if (!r.ok)
       die5(`fs rm: [${r.error}] ${r.detail}${r.hint ? " — " + r.hint : ""}`);
-    ok5(`fs rm ${repopath}`);
+    ok6(`fs rm ${repopath}`);
   },
   edit: fsCmdEdit,
   lock: async (client, args2) => {
@@ -11947,15 +12447,15 @@ var FS_CMDS = {
         const holder = extractLockHolder(r.detail) ?? "another participant";
         const sub2 = await subscribePathWatch(client, repopath);
         if (!sub2.ok)
-          ok5(`fs lock: warning — watch registration failed [${sub2.error}] ${sub2.detail} — you will not be notified of conflicts`);
+          ok6(`fs lock: warning — watch registration failed [${sub2.error}] ${sub2.detail} — you will not be notified of conflicts`);
         die5(`fs lock: path '${repopath}' is locked by '${holder}' — you will be notified when it frees`);
       }
       die5(`fs lock: [${r.error}] ${r.detail}${r.hint ? " — " + r.hint : ""}`);
     }
-    ok5(`fs lock ${repopath} (seq=${r.seq})`);
+    ok6(`fs lock ${repopath} (seq=${r.seq})`);
     const sub = await subscribePathWatch(client, repopath);
     if (!sub.ok)
-      ok5(`fs lock: warning — lock succeeded but watch registration failed [${sub.error}] ${sub.detail} — you will not be notified of conflicts`);
+      ok6(`fs lock: warning — lock succeeded but watch registration failed [${sub.error}] ${sub.detail} — you will not be notified of conflicts`);
   },
   unlock: async (client, args2) => {
     const repopath = args2.positional[0];
@@ -11964,7 +12464,7 @@ var FS_CMDS = {
     const r = await client.postEntry({ performative: "file.unlock", data: { path: repopath } });
     if (!r.ok)
       die5(`fs unlock: [${r.error}] ${r.detail}${r.hint ? " — " + r.hint : ""}`);
-    ok5(`fs unlock ${repopath} (seq=${r.seq})`);
+    ok6(`fs unlock ${repopath} (seq=${r.seq})`);
     await unsubscribePathWatch(client, repopath);
   },
   grep: async (client, args2) => {
@@ -11974,7 +12474,7 @@ var FS_CMDS = {
     const prefix = flag5(args2, "prefix");
     const limitStr = flag5(args2, "limit");
     const limit = limitStr ? parseInt(limitStr, 10) : undefined;
-    const doHydrate = flagBool2(args2, "hydrate");
+    const doHydrate = flagBool3(args2, "hydrate");
     const into = resolveWorkspaceRoot(flag5(args2, "into"), flag5(args2, "root"));
     const result = await client.search(query, { prefix, limit });
     if ("error" in result) {
@@ -11988,11 +12488,11 @@ var FS_CMDS = {
       process.exit(1);
     }
     if (result.results.length === 0) {
-      ok5("(no matches)");
+      ok6("(no matches)");
       return;
     }
     for (const r of result.results)
-      ok5(grepLine(r));
+      ok6(grepLine(r));
     if (!doHydrate)
       return;
     const home = flag5(args2, "home");
@@ -12006,14 +12506,14 @@ var FS_CMDS = {
       return;
     }
     if (hydrateResult.rows.some((r) => getRowNeedsVerify(r.outcome)))
-      ok5("verify: mesh fs status");
+      ok6("verify: mesh fs status");
     process.exitCode = hydrateResult.exitCode;
   },
   hydrate: async (client, args2) => {
     const prefix = args2.positional[0] ?? "";
     const into = resolveWorkspaceRoot(flag5(args2, "into"), flag5(args2, "root"));
     const home = flag5(args2, "home");
-    const prune = flagBool2(args2, "prune");
+    const prune = flagBool3(args2, "prune");
     const reporter = createReporter({ mode: resolveMode(false, process.stderr.isTTY ?? false) });
     const result = await hydrateSubtree(client, prefix, into, client.roomId, home, prune, reporter.sink);
     if (result.hardError) {
@@ -12024,22 +12524,22 @@ var FS_CMDS = {
       return;
     }
     if (result.rows.length === 0) {
-      ok5("(nothing to hydrate)");
+      ok6("(nothing to hydrate)");
       return;
     }
-    ok5(`fs hydrate: ${result.rows.length} path(s) under ${prefix || "(room root)"} → ${resolve3(into)}`);
+    ok6(`fs hydrate: ${result.rows.length} path(s) under ${prefix || "(room root)"} → ${resolve3(into)}`);
     if (result.rows.some((r) => getRowNeedsVerify(r.outcome)))
-      ok5(`verify: mesh fs status${prefix ? " " + prefix : ""}`);
+      ok6(`verify: mesh fs status${prefix ? " " + prefix : ""}`);
     process.exitCode = result.exitCode;
   },
   log: async (client, args2) => {
-    const follow = flagBool2(args2, "f");
+    const follow = flagBool3(args2, "f");
     const tty = process.stdout.isTTY ?? false;
     if (follow) {
       const { entries, head } = await client.getEntries({ limit: 100 });
       const fsEntries = entries.filter((e) => isFilePlaneEntry(e.submission.performative));
       if (fsEntries.length > 0)
-        ok5(renderEntries(fsEntries));
+        ok6(renderEntries(fsEntries));
       let senderWidth;
       if (fsEntries.length > 0) {
         const widths = fsEntries.map((e) => e.submission.sender.length);
@@ -12050,7 +12550,7 @@ var FS_CMDS = {
       if (tty)
         process.stdout.write(footer);
       else
-        ok5(footer);
+        ok6(footer);
       for await (const frame of client.follow(since)) {
         if (frame.type === "entry" && isFilePlaneEntry(frame.entry.submission.performative)) {
           if (senderWidth === undefined) {
@@ -12060,7 +12560,7 @@ var FS_CMDS = {
           if (tty)
             printAboveFooter(line, footer);
           else
-            ok5(line);
+            ok6(line);
           since = frame.entry.seq;
         }
       }
@@ -12071,11 +12571,11 @@ var FS_CMDS = {
       const { entries, head } = await client.getEntries({ limit: 200 });
       const fsEntries = entries.filter((e) => isFilePlaneEntry(e.submission.performative));
       if (fsEntries.length === 0) {
-        ok5("(no file-plane entries)");
+        ok6("(no file-plane entries)");
       } else {
-        ok5(renderEntries(fsEntries));
+        ok6(renderEntries(fsEntries));
       }
-      ok5(renderStateHeader(head));
+      ok6(renderStateHeader(head));
     }
   },
   grant: fsCmdGrant,
@@ -12110,7 +12610,7 @@ var FS_CMDS = {
     };
     const closure = await tsResolver.closure(entryPath, read);
     const state = await client.getState();
-    const defaultAccess = state.defaults.default_access ?? "open";
+    const defaultAccess = normalizeDefaultAccess(state.defaults.default_access).discover;
     const grantsResult = await client.listGrants();
     if (!Array.isArray(grantsResult)) {
       die5(`fs deps: [${grantsResult.error}] ${grantsResult.detail}`);
@@ -12127,13 +12627,13 @@ var FS_CMDS = {
       });
     };
     if (closure.length === 0) {
-      ok5(`${entryPath}: no out-of-entry dependencies found`);
+      ok6(`${entryPath}: no out-of-entry dependencies found`);
       return;
     }
     const flagged = flagOutOfScope(closure, canRead);
     for (const { path: path3, readable } of flagged) {
       const tag = readable ? "[readable]" : "[unreadable — run: mesh fs request " + path3 + "]";
-      ok5(`  ${path3}  ${tag}`);
+      ok6(`  ${path3}  ${tag}`);
     }
   },
   request: async (client, args2) => {
@@ -12146,31 +12646,31 @@ var FS_CMDS = {
     const r = await client.postEntry({ performative: "file.request", data: { path: requestPath, grade } });
     if (!r.ok)
       die5(`fs request: [${r.error}] ${r.detail}${r.hint ? " — " + r.hint : ""}`);
-    ok5(`fs request ${grade} on ${requestPath} (seq=${r.seq})`);
+    ok6(`fs request ${grade} on ${requestPath} (seq=${r.seq})`);
   },
   status: async (client, args2) => {
     const prefix = args2.positional[0] ?? "";
-    const deep = flagBool2(args2, "deep");
-    const porcelain = flagBool2(args2, "porcelain");
+    const deep = flagBool3(args2, "deep");
+    const porcelain = flagBool3(args2, "porcelain");
     const home = flag5(args2, "home");
     const root = resolve3(flag5(args2, "root") ?? ".");
     const rows = await statusScan(client, { prefix, root, home, deep });
     const normPrefix = prefix ? normalizeId(prefix) : "";
     if (!porcelain)
-      ok5(`fs status: ${rows.length} path(s) under ${normPrefix || "."} (room=${client.roomId})`);
+      ok6(`fs status: ${rows.length} path(s) under ${normPrefix || "."} (room=${client.roomId})`);
     for (const row of rows)
-      ok5(formatStatusLine(row, { porcelain }));
+      ok6(formatStatusLine(row, { porcelain }));
     if (!porcelain) {
       const needsGet = rows.find((r) => r.state === "behind" || r.state === "diverged");
       if (needsGet)
-        ok5(`next: mesh fs get ${needsGet.path}`);
+        ok6(`next: mesh fs get ${needsGet.path}`);
     }
   },
   diff: async (client, args2) => {
     const repopath = args2.positional[0];
     if (!repopath)
       die5("fs diff: <path> is required");
-    const showBase = flagBool2(args2, "base");
+    const showBase = flagBool3(args2, "base");
     const root = resolve3(flag5(args2, "root") ?? ".");
     const home = flag5(args2, "home");
     const t = await client.getTree();
@@ -12184,7 +12684,7 @@ var FS_CMDS = {
     const norm = normalizeId(repopath);
     let localBytes;
     try {
-      localBytes = readFileSync6(join5(root, repopath));
+      localBytes = readFileSync7(join6(root, repopath));
     } catch {
       die5(`fs diff: no local copy at ${resolve3(root, repopath)} — run 'mesh fs get ${repopath}' first`);
     }
@@ -12198,26 +12698,26 @@ var FS_CMDS = {
     if (!(blob instanceof Uint8Array))
       die5(`fs diff: [${blob.error}] ${blob.detail}${blob.hint ? " — " + blob.hint : ""}`);
     if (!isValidUtf8Bytes(new Uint8Array(localBytes)) || !isValidUtf8Bytes(blob)) {
-      ok5(`binary differs: ${localBytes.length}b vs ${blob.length}b`);
+      ok6(`binary differs: ${localBytes.length}b vs ${blob.length}b`);
       return;
     }
     const mineText = localBytes.toString("utf8");
     const tipText = Buffer.from(blob).toString("utf8");
     const sidecar = readSidecar(client.roomId, norm, home);
     if (!sidecar)
-      ok5("(no sync base — comparing mine vs tip only)");
+      ok6("(no sync base — comparing mine vs tip only)");
     if (showBase && sidecar) {
       if (sidecar.content === undefined) {
-        ok5("(sidecar stores hash only — base text not cached locally; comparing mine vs tip only)");
+        ok6("(sidecar stores hash only — base text not cached locally; comparing mine vs tip only)");
       } else {
-        ok5("# base -> mine");
-        ok5(unifiedDiff(sidecar.content, mineText, "base", "mine"));
-        ok5("# base -> tip");
-        ok5(unifiedDiff(sidecar.content, tipText, "base", "tip"));
+        ok6("# base -> mine");
+        ok6(unifiedDiff(sidecar.content, mineText, "base", "mine"));
+        ok6("# base -> tip");
+        ok6(unifiedDiff(sidecar.content, tipText, "base", "tip"));
         return;
       }
     }
-    ok5(unifiedDiff(mineText, tipText, "mine", "tip"));
+    ok6(unifiedDiff(mineText, tipText, "mine", "tip"));
   }
 };
 async function cmdFs(args2) {
@@ -12264,6 +12764,28 @@ async function cmdDecide(args2) {
   }
   await handler(client, args2, identity.id);
 }
+function claimStateMarkers(claim, selfId, nowMs) {
+  const stalled = isClaimStalled({ state: claim.state, holder: claim.holder, max_claim_until: claim.max_claim_until != null ? Date.parse(claim.max_claim_until) : null }, selfId, nowMs) ? "  STALLED" : "";
+  const rejected = claim.rejected_holder != null ? `  rejected(${claim.rejected_holder}@${claim.reject_seq})` : "";
+  return `${stalled}${rejected}`;
+}
+async function cmdDoctor(args2) {
+  const home = flag5(args2, "home");
+  const roomArg = flag5(args2, "room");
+  const { roomId, entry: room } = resolveRoom(roomArg, home);
+  const identity = loadIdentityWithSecret(home);
+  if (!identity)
+    die5('No identity. Run "mesh keygen" first.');
+  const client = new MeshClient({
+    roomUrl: room.url,
+    token: room.token,
+    senderId: identity.id,
+    roomId,
+    secretBytes: identity.secretBytes
+  });
+  const root = resolve3(flag5(args2, "root") ?? ".");
+  await runDoctor(client, args2, { root, home });
+}
 async function cmdState(args2) {
   const home = flag5(args2, "home");
   const roomArg = flag5(args2, "room");
@@ -12279,20 +12801,21 @@ async function cmdState(args2) {
     secretBytes: identity.secretBytes
   });
   const state = await client.getState();
-  ok5(renderStateHeader(state.head));
-  ok5("");
-  ok5("Claims:");
+  ok6(renderStateHeader(state.head));
+  ok6("");
+  ok6("Claims:");
   if (state.claims.length === 0) {
-    ok5("  (none)");
+    ok6("  (none)");
   } else {
     for (const claim of state.claims) {
       const holder = claim.holder ? `  holder=${claim.holder}` : "";
       const lease = claim.lease_expires ? `  lease=${claim.lease_expires}` : "";
-      ok5(`  ${claim.task_ref}  ${claim.state}${holder}${lease}`);
+      const markers = claimStateMarkers(claim, identity.id, Date.now());
+      ok6(`  ${claim.task_ref}  ${claim.state}${holder}${lease}${markers}`);
     }
   }
-  ok5("");
-  ok5("Roster:");
+  ok6("");
+  ok6("Roster:");
   const rosterRows = state.roster.map((p) => ({
     participant_id: p.participant_id,
     roles: p.roles,
@@ -12302,43 +12825,57 @@ async function cmdState(args2) {
     last_seen_seq: p.last_seen_seq,
     condition: p.condition,
     condition_seq: p.condition_seq,
+    condition_ts: p.condition_ts,
     retired_seq: p.retired_seq,
     pubkey: p.pubkey
   }));
-  ok5(renderRoster(rosterRows));
+  ok6(renderRoster(rosterRows));
+  ok6("");
+  ok6("Bindings:");
+  const stateBindings = state.bindings ?? [];
+  if (stateBindings.length === 0) {
+    ok6("  (none)");
+  } else {
+    for (const b of stateBindings) {
+      ok6(`  ${scrubControl(b.participant)}  ${scrubControl(b.role)}  ${fmtWindow(b.active_from, b.active_until)}  in_window=${b.in_window}`);
+    }
+  }
+}
+function buildWatchPredicate(args2) {
+  const subCmd = args2.positional[0];
+  if (subCmd === "task") {
+    const taskRef = args2.positional[1];
+    const state = args2.positional[2];
+    if (!taskRef || !state)
+      die5("watch task: usage: mesh watch task <task_ref> <STATE>");
+    return { kind: "task_state", task_ref: taskRef, to: state };
+  } else if (subCmd === "entry") {
+    const perf = flag5(args2, "performative");
+    const thread = flag5(args2, "thread");
+    const mentionMe = flagBool3(args2, "mention-me");
+    const path3 = flag5(args2, "path");
+    const participant = flag5(args2, "participant");
+    const taskRef = flag5(args2, "task-ref");
+    return {
+      kind: "entry",
+      ...perf !== undefined ? { performative: perf } : {},
+      ...thread !== undefined ? { thread } : {},
+      ...mentionMe ? { mention_me: true } : {},
+      ...path3 !== undefined ? { path: path3 } : {},
+      ...participant !== undefined ? { participant } : {},
+      ...taskRef !== undefined ? { task_ref: taskRef } : {}
+    };
+  }
+  die5('watch: sub-command must be "task" or "entry"');
 }
 async function cmdWatch(args2) {
-  const subCmd = args2.positional[0];
   const home = flag5(args2, "home");
   const roomArg = flag5(args2, "room");
   const { roomId, entry: room } = resolveRoom(roomArg, home);
   const identity = loadIdentityWithSecret(home);
   if (!identity)
     die5('No identity. Run "mesh keygen" first.');
-  let predicate;
-  if (subCmd === "task") {
-    const taskRef = args2.positional[1];
-    const state = args2.positional[2];
-    if (!taskRef || !state)
-      die5("watch task: usage: mesh watch task <task_ref> <STATE>");
-    predicate = { kind: "task_state", task_ref: taskRef, to: state };
-  } else if (subCmd === "entry") {
-    const perf = flag5(args2, "performative");
-    const thread = flag5(args2, "thread");
-    const mentionMe = flagBool2(args2, "mention-me");
-    const path3 = flag5(args2, "path");
-    const participant = flag5(args2, "participant");
-    predicate = {
-      kind: "entry",
-      ...perf !== undefined ? { performative: perf } : {},
-      ...thread !== undefined ? { thread } : {},
-      ...mentionMe ? { mention_me: true } : {},
-      ...path3 !== undefined ? { path: path3 } : {},
-      ...participant !== undefined ? { participant } : {}
-    };
-  } else {
-    die5('watch: sub-command must be "task" or "entry"');
-  }
+  const predicate = buildWatchPredicate(args2);
   const client = new MeshClient({
     roomUrl: room.url,
     token: room.token,
@@ -12349,7 +12886,7 @@ async function cmdWatch(args2) {
   const result = await client.postWatch(predicate);
   if (!result.ok)
     die5(`watch failed: [${result.error}] ${result.detail}`);
-  ok5(`Watch registered: ${result.watch_id}`);
+  ok6(`Watch registered: ${result.watch_id}`);
 }
 async function cmdWhoami(args2) {
   const home = flag5(args2, "home");
@@ -12357,22 +12894,22 @@ async function cmdWhoami(args2) {
   if (!identity)
     die5('No identity. Run "mesh keygen --id <id>" first.');
   const h2 = home ?? meshHome();
-  ok5(`id:     ${identity.id}`);
-  ok5(`pubkey: ${identity.pubkey}`);
+  ok6(`id:     ${identity.id}`);
+  ok6(`pubkey: ${identity.pubkey}`);
   if (identity.roles && identity.roles.length > 0)
-    ok5(`roles:  ${identity.roles.join(", ")}`);
-  ok5(`home:   ${h2}  (config dir — set MESH_HOME or --home to change)`);
-  ok5(`        holds identity.json · rooms.json · active_room`);
+    ok6(`roles:  ${identity.roles.join(", ")}`);
+  ok6(`home:   ${h2}  (config dir — set MESH_HOME or --home to change)`);
+  ok6(`        holds identity.json · rooms.json · active_room`);
   const rooms = loadRooms(home);
   const roomIds = Object.keys(rooms);
   if (roomIds.length > 0) {
     const active = getActiveRoom(home);
-    ok5(`rooms:  ${roomIds.map((r) => r === active ? `${r} (active)` : r).join(", ")}`);
+    ok6(`rooms:  ${roomIds.map((r) => r === active ? `${r} (active)` : r).join(", ")}`);
   }
 }
 async function cmdInbox(args2) {
   const sinceStr = flag5(args2, "since");
-  const mark = flagBool2(args2, "mark");
+  const mark = flagBool3(args2, "mark");
   const home = flag5(args2, "home");
   const roomArg = flag5(args2, "room");
   const { roomId, entry: room } = resolveRoom(roomArg, home);
@@ -12389,22 +12926,34 @@ async function cmdInbox(args2) {
   const opts = { mark };
   if (sinceStr !== undefined)
     opts.since = parseInt(sinceStr, 10);
-  const result = await client.getEntries(opts);
+  const [result, state] = await Promise.all([client.getEntries(opts), client.getState().catch(() => null)]);
   if (result.entries.length === 0 && result.notifies.length === 0) {
-    ok5("(inbox empty)");
+    ok6("(inbox empty)");
   } else {
     if (result.entries.length > 0)
-      ok5(renderEntries(result.entries));
+      ok6(renderEntries(result.entries));
     for (const n of result.notifies) {
-      ok5(`  notify  watch=${n.watch_id}  entry_seq=${n.entry_seq}`);
+      ok6(`  notify  watch=${n.watch_id}  entry_seq=${n.entry_seq}`);
     }
   }
-  ok5(renderStateHeader(result.head));
+  ok6(renderStateHeader(result.head));
   if (mark)
-    ok5("(read cursor advanced)");
+    ok6("(read cursor advanced)");
+  const badge = composeBadge({
+    unread: result.entries.length,
+    fsBehind: 0,
+    fsConflict: 0,
+    openDecisions: state !== null ? openDecisionsCount(state, identity.id) : 0
+  });
+  if (badge !== null)
+    ok6(badge);
+  process.exitCode = inboxExitCode(result.entries.length, result.notifies.length);
+}
+function inboxExitCode(entryCount, notifyCount) {
+  return entryCount > 0 || notifyCount > 0 ? 1 : 0;
 }
 function usage() {
-  ok5(`mesh v${getVersion()} — shared agent coordination & live workspace
+  ok6(`mesh v${getVersion()} — shared agent coordination & live workspace
 
 identity:
   init                                                      Interactive setup: profile + identity + room
@@ -12446,10 +12995,11 @@ tasks:
   accept <task_ref> [--body <s>]                            Accept delivery → DONE
   reject <task_ref> --body <reason>                         Reject delivery → back to ANNOUNCED
   inform <task_ref> --body <s>                              Post a progress update (no state change)
+  ack <escalate_seq>                                        Mark an escalation handled (attributed; any member)
   fetch <task|r2:hash> [--into <dir>]                       Download + extract a delivered artifact
   watch task <task_ref> <STATE>                             Register a task-state watch
   watch entry [--performative P] [--thread T]               Register an entry watch
-            [--mention-me] [--path <p>] [--participant <id>]
+            [--mention-me] [--path <p>] [--participant <id>] [--task-ref <ref>]
 
 files:
   (workspace root = cwd by default, --root <dir> overrides, --into <dir> stays for one-off scratch staging; identity = normalizeId(path) relative to that root, same in the room tree)
@@ -12471,7 +13021,8 @@ files:
   fs roles                                                  List all role bindings in the room
   fs role-rm <participant> <role>                           Unbind a participant's file-plane role (owner only)
   fs leases                                                 List all active file leases
-  fs config <open|closed> | rate <spec>                     Set default_access posture, or the room rate limit (e.g. "30/min;burst=60") — owner only
+  fs config <open|closed> | write <open|closed> | discover <open|closed> | rate <spec> | authority-source <card|bindings>
+                                                             Set default_access posture (bare = both grades; write/discover set one independently), the room rate limit (e.g. "30/min;burst=60"), or verdict authority posture — owner only
   fs deps <path>                                            Walk a file's import closure; flag deps you can't read
   fs request <path> [--grade read]                          Post an advisory access request for a path
   fs status [<prefix>] [--deep] [--porcelain] [--root <dir>]  Awareness: per-file sync state vs the room (= in-sync ↑ ahead ↓ behind ⇅ diverged C markers \uD83D\uDD12 locked ? untracked ✝ room-deleted); --deep dry-runs a merge on diverged files; read-only, exit 0 always
@@ -12481,6 +13032,9 @@ agent:
   state                                                     Show claims table + roster
   inbox [--since <seq>] [--mark]                            Fetch entries since your read cursor
   brief                                                     Show room charter + your seat(s) + situation (Intent I)
+  doctor [--porcelain] [--root <dir>]                       One-step health view: open escalations, stalled holds, lapsed/overdue
+                                                             decisions, stale/gone conditions, local fs conflicts, chain integrity,
+                                                             missing delivered artifacts; exit 0 clean / 1 problems found / 2 hard error
 
 decisions:
   decide ask "<question>" --by <arm[,arm...]> [--deadline <ISO>]     Ask a named settler (id:<pid>|role:<name> arms)
@@ -12516,7 +13070,7 @@ async function cmdIdentity(args2) {
 function cmdIdentityList() {
   const homes = listIdentityHomes();
   if (homes.length === 0) {
-    ok5('No identities under ~/.mesh*. Run "mesh keygen --id <id>".');
+    ok6('No identities under ~/.mesh*. Run "mesh keygen --id <id>".');
     return;
   }
   const current = process.env["MESH_HOME"] ?? meshHome();
@@ -12526,19 +13080,19 @@ function cmdIdentityList() {
     set.add(identity.pubkey);
     keysById.set(identity.id, set);
   }
-  ok5(`Local identities (~/.mesh*) — current MESH_HOME: ${current}`);
+  ok6(`Local identities (~/.mesh*) — current MESH_HOME: ${current}`);
   for (const { home, identity } of homes) {
     const mark = home === current ? "*" : " ";
     const dupe = (keysById.get(identity.id)?.size ?? 1) > 1 ? "  ⚠ id reused with a different key" : "";
-    ok5(`${mark} ${home}`);
-    ok5(`    ${identity.id}  ${identity.pubkey}${dupe}`);
+    ok6(`${mark} ${home}`);
+    ok6(`    ${identity.id}  ${identity.pubkey}${dupe}`);
   }
   const collided = [...keysById.entries()].filter(([, s]) => s.size > 1).map(([id2]) => id2);
   if (collided.length > 0) {
-    ok5(``);
-    ok5(`⚠ Same id, different keypairs: ${collided.join(", ")}. A room trusts only the FIRST key an id`);
-    ok5(`  used (trust-on-first-use); the others hit id_taken on join. Reconcile into one identity:`);
-    ok5(`    mesh identity copy --from <home-that-owns-the-room> --to <other-home> --force`);
+    ok6(``);
+    ok6(`⚠ Same id, different keypairs: ${collided.join(", ")}. A room trusts only the FIRST key an id`);
+    ok6(`  used (trust-on-first-use); the others hit id_taken on join. Reconcile into one identity:`);
+    ok6(`    mesh identity copy --from <home-that-owns-the-room> --to <other-home> --force`);
   }
 }
 async function cmdIdentityCopy(args2) {
@@ -12554,14 +13108,14 @@ async function cmdIdentityCopy(args2) {
   if (!src)
     die5(`identity copy: no identity.json in ${from2}`);
   const dst = loadIdentity(to);
-  if (dst && !flagBool2(args2, "force")) {
+  if (dst && !flagBool3(args2, "force")) {
     die5(`identity copy: ${to} already has identity "${dst.id}" (${dst.pubkey}). Use --force to overwrite.`);
   }
   saveIdentity(src, to);
-  ok5(`Copied identity → ${to}`);
-  ok5(`  ${src.id}  ${src.pubkey}`);
-  ok5(`Both homes now share ONE keypair (local-testing only — they are now the SAME participant,`);
-  ok5(`not isolated agents). Use separate keygen'd identities for anything real.`);
+  ok6(`Copied identity → ${to}`);
+  ok6(`  ${src.id}  ${src.pubkey}`);
+  ok6(`Both homes now share ONE keypair (local-testing only — they are now the SAME participant,`);
+  ok6(`not isolated agents). Use separate keygen'd identities for anything real.`);
 }
 async function main() {
   const argv = process.argv.slice(2);
@@ -12570,7 +13124,7 @@ async function main() {
     return;
   }
   if (wantsVersion(argv)) {
-    ok5(`mesh v${getVersion()}`);
+    ok6(`mesh v${getVersion()}`);
     return;
   }
   const args2 = parseArgs(argv);
@@ -12609,6 +13163,8 @@ async function main() {
       return simpleTaskCmd("reject", args2, true);
     case "inform":
       return simpleTaskCmd("inform", args2, true);
+    case "ack":
+      return cmdAck(args2);
     case "state":
       return cmdState(args2);
     case "watch":
@@ -12629,15 +13185,17 @@ async function main() {
       return cmdFs(args2);
     case "decide":
       return cmdDecide(args2);
+    case "doctor":
+      return cmdDoctor(args2);
     case "version":
-      ok5(`mesh v${getVersion()}`);
+      ok6(`mesh v${getVersion()}`);
       return;
     case "use": {
       const name = args2.positional.shift();
       if (!name)
         die5("use: <profile-name> is required");
       setActiveProfile(name);
-      ok5(`Active profile set to "${name}".`);
+      ok6(`Active profile set to "${name}".`);
       return;
     }
     case "profile": {
@@ -12645,12 +13203,12 @@ async function main() {
       if (sub === "list") {
         const profiles = listProfiles();
         if (profiles.length === 0) {
-          ok5("No profiles. Create one with: mesh use <name>");
+          ok6("No profiles. Create one with: mesh use <name>");
           return;
         }
         const active = getActiveProfile();
         for (const p of profiles)
-          ok5(`${p === active ? "*" : " "} ${p}`);
+          ok6(`${p === active ? "*" : " "} ${p}`);
         return;
       }
       die5(`profile: unknown subcommand "${sub ?? ""}". Available: list`);
@@ -12678,11 +13236,15 @@ export {
   wantsVersion,
   wantsHelp,
   statusScan,
+  runDeliver,
+  runAck,
   resolveFetchRef,
   resolveDeliverMode,
+  openDecisionsCount,
   makeRateRetry,
   localSizes,
   isFilePlaneEntry,
+  inboxExitCode,
   hydrateSubtree,
   hydrateGrepWinners,
   grepLine,
@@ -12691,5 +13253,8 @@ export {
   flagOutOfScope,
   extractInviteSecret,
   collectAllEntries,
-  cmdFs
+  cmdFs,
+  claimStateMarkers,
+  buildWatchPredicate,
+  JOIN_NEXT_STEPS
 };

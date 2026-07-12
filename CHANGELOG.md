@@ -3,6 +3,175 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.19.0] — 2026-07-12
+
+### Security
+
+- **Write posture split from discover posture (`default_access`, Intent K
+  S-K5/S-K6).** `default_access` was a single `"open"|"closed"` flag gating both
+  tree-discovery visibility and file writes together; it is now
+  `{discover, write}`, each independently `"open"` or `"closed"`. **New rooms
+  default to `{discover:"open", write:"closed"}`** — writes are granted, not
+  assumed, while discovery stays open (mirrors the `authority_source`
+  secure-by-default posture, no config step required for a fresh room to be
+  safe). **Existing rooms are unaffected** — a legacy `default_access` string
+  (or its absence) is read as both grades set to that value, byte-for-byte
+  unchanged, until the owner explicitly reconfigures it. `system.config` /
+  `POST /config` accept the legacy string OR the new object (both grades
+  required — no silent partial merge) for wire compatibility. New CLI forms:
+  `mesh fs config write <open|closed>` and `mesh fs config discover
+  <open|closed>` set one grade independently; the bare `mesh fs config
+  <open|closed>` still sets both (legacy alias). A closed-write denial now
+  names the remedy: `mesh fs request --grade write <path>`. See
+  `docs/operating.md#authority-posture-verdict-authority-authority_source` for
+  the full runbook.
+- **Role-lapse announce (`system.role_lapse`, Intent K S-K4).** A time-boxed
+  `system.role` binding's `active_until` passing now appends a room-authored
+  `system.role_lapse` entry (`{participant, role, active_until}`) — scheduled
+  from an alarm-driven `role:<participant>:<role>` timer, or fired
+  synchronously at `POST /roles` for a bind whose window is already past.
+  Announce-only: the read-time window filter (`listRolesForParticipant`)
+  remains the sole enforcement, so a lost or delayed announcement can never
+  create or extend an authority hole.
+
+### Added
+
+- **`escalate` gains addressees + `escalate.ack` + the `escalations`
+  projection (Intent L S-L2/S-L5).** Room-authored escalates now carry
+  `data.to: string[]` (`[owner, ...verdict_by]` deduped, or `[owner]` for a
+  task-less `timer_failed`) as an advisory routing target. Every escalate
+  entry also folds an open row into a new durable `escalations` table
+  (surfaced in `GET /state`), closable by ANY member via the new
+  participant-authorable `escalate.ack` performative — `mesh ack
+  <escalate_seq>` marks it handled, attributed and visible in the record.
+  Double-ack, or acking a non-escalate seq, is rejected (`already_acked` /
+  `unknown_escalation`).
+- **Per-task escalation watches (Intent L, `task_ref` predicate field).**
+  `EntryPredicate` gains an optional `task_ref`, matched with the same
+  AND-fall-through semantics as `path`/`participant` — `mesh watch entry
+  --task-ref <ref>` scopes a watch to one task's traffic instead of every
+  performative in the room.
+- **`stalled` duty bucket (Intent L S-L4).** `claim` rows expose
+  `max_claim_until`; `computeDuties` derives a `stalled: string[]` bucket
+  (self-held claims past their `max_claim_s` cap) surfaced in `mesh brief`'s
+  duties, the daemon's duty nudge, and `mesh doctor`.
+- **Deliver auto-watch + reject retention (Intent L S-L3).** `mesh deliver`
+  (both `--dir` and `--artifact` modes) now auto-registers a best-effort
+  watch on its own task's `ANNOUNCED`→`DONE` transitions (non-fatal on
+  `429`, mirrors the existing `path_locked` auto-subscribe pattern). A
+  `reject` verdict now also records `rejected_holder`/`reject_seq` on the
+  claim row — most-recent rejection, never cleared on re-claim — surfaced via
+  `GET /state` as observability bookkeeping (no state-machine change).
+- **Consumer error visibility (Intent L S-L7).** The daemon's WS/poll
+  consume loop adopts the heartbeat `onError` callback pattern: a
+  consecutive-failure counter (`consume.failure_threshold`, default 3) logs
+  a pipe-dead transition exactly once and marks daemon-local state
+  `unknown`; on recovery it publishes a fresh `signal(working)` so the
+  roster catches up promptly.
+- **Honest presence render (Intent L S-L7).** `mesh state` / roster renders
+  and `mesh brief` now show each participant's `condition` with its age and
+  flip to `stale (unknown)` once `condition_ts` is older than the room's
+  liveness baseline × 3 (`CONDITION_STALE_AFTER_MS`, 900s at the 300s
+  default) — a dead consume pipe can't publish, so this catches the case a
+  lease hasn't expired yet but the last signal is untrustworthy.
+- **`GET /state` grows `bindings[]` (Intent M, eng-review decision).** The
+  same resolved role-binding view `GET /roles` serves is now duplicated onto
+  `/state` so every attention/duty/badge consumer — the duty loop, WAKE
+  rules, the ambient badge, `mesh state` — reads authority from ONE field,
+  never `roster.roles` (the join-time card cohort).
+- **WAKE derived defaults (Intent M S-M1, `attention.derived`).** The daemon
+  now wakes on mentions, a `decide.request` naming self or a bound role, a
+  `deliver` where self ∈ `verdict_by`, an `escalate` addressed to self or a
+  bound role, a conflicting `inform` touching a self-held lease, and a
+  `stuck`/`gone` `signal` from a participant a self-held claim
+  `depends_on` — sourced entirely from the standing `/state` poll's
+  `bindings[]`/grants, zero new daemon traffic. Default ON; opt out with
+  `attention.derived: false` in `mesh.yml`. `file.write` under a self-held
+  grant is deliberately CHECK-tier, never WAKE (R-M1).
+- **Ambient tree-diff awareness (Intent M, `WorksetScanner`).** The daemon
+  now runs a background scan (`workset.interval_s`, default 15s, floors at
+  5s) diffing the local workspace against the room's `/tree` metadata via an
+  mtime/size-hashed cache — zero blob fetches, never writes under the
+  workspace root — producing `{behind, conflict}` counts that feed the
+  ambient badge and `mesh doctor`.
+- **CHECK-tier ambient badge + brief situational section (Intent M S-M3).**
+  One stable, parseable status line — `unread: N · fs: X behind, Y
+  conflict · Z open decisions` — composed by a single shared function and
+  printed identically by `mesh inbox`, `mesh brief`, and the `mesh
+  chat`/`mesh log -f` footers (an all-clear state prints nothing). `mesh
+  brief` additionally renders the roster it already fetches: participant ·
+  bound roles · condition · claimed-not-by-me refs. `mesh inbox` now exits 1
+  when entries/notifies are present (the `fs` exit-code convention). `mesh
+  join`'s success output ends with a next-steps block (`mesh brief` · `mesh
+  inbox` · `fs status`).
+- **`mesh doctor` (Intent L S-L6).** One-step, read-only open-problems view:
+  open escalations (with an ack hint), stalled holds, lapsed/overdue
+  decisions, stale/gone conditions, local `fs status` conflicts, chain
+  integrity (`GET /verify`), and missing delivered artifacts.
+  `--porcelain` prints stable `KIND\tref\tdetail` rows; exit `0` clean / `1`
+  problems found / `2` hard error.
+- **Background cache prefetch (Intent M S-M5).** On every consumed
+  `file.write` under a readable prefix, the daemon background-warms
+  `WorkspaceCache` by `content_hash` (skipping already-warm hashes and files
+  over `prefetch.max_bytes`, default 5 MB) — failures swallowed, off via
+  `prefetch.enabled: false`. Never touches the working tree.
+
+### Changed
+
+- **Watch `EntryPredicate`** gains `task_ref` alongside the existing
+  `path`/`participant` fields (see "Per-task escalation watches" above).
+- **`GET /state`** response shape grows `bindings[]` and `escalations[]`
+  (see "Added" above); every daemon/CLI consumer reading role authority now
+  reads this field instead of `roster.roles`.
+
+### Fixed
+
+- **`fs put` failures are now classified and readable (builds on v1.17.0's `_err`
+  snippet).** A non-JSON HTTP failure from an edge/proxy/WAF (the `HTTP 403` an
+  oversized or WAF-blocked artifact upload hits before it ever reaches the room
+  worker) no longer prints `[unknown_error]` followed by a wall of raw HTML DTD.
+  The client now maps the bare status to a real code (`403`→`forbidden`,
+  `413`→`artifact_too_large`, `429`→`rate_limited`, `5xx`→`server_error`, …),
+  suppresses
+  HTML/markup bodies to a `non-JSON body (edge/proxy)` marker (still control-byte
+  stripped, no terminal-escape injection), and attaches a per-status remediation
+  hint. The hint is now also preserved through the `putArtifact` and fork
+  write-back branches of `fsPutOcc`/`forkWrite`, which previously dropped it before
+  the row renderer — so the failing row finally shows *why* and *what to do*.
+
+## [1.18.0] — 2026-07-11 (security hotfix)
+
+### Security
+
+- **Verdict authority no longer trusts self-declared card roles.** `accept`/`reject`
+  previously resolved `verdict_by` role membership from the sender's own card
+  (`roster.roles`, set at join time and never re-checked) — the same field a
+  token-invited joiner controls. A joiner could self-declare a reviewer role on their
+  card and pass verdicts on any task naming that role, with no owner action required.
+  A new room-level posture, `authority_source: "card" | "bindings"`, gates the source:
+  under `"bindings"`, `accept`/`reject` require an owner-issued, time-boxed
+  `role_bindings` entry (`mesh fs role <participant> <role>`) — a self-declared card
+  role no longer confers verdict power. **New rooms default to `"bindings"`** (secure
+  by default). **Existing rooms are unaffected until you opt in** — the field is
+  absent in their defaults blob, which resolves to `"card"` (today's behavior,
+  byte-for-byte). Upgrade path: `mesh fs config authority-source bindings` (owner
+  only; bind every current verdict-holder first). `mesh brief` warns the room owner
+  in-room while a room they own is still on `"card"` posture. See
+  `docs/operating.md#authority-posture-verdict-authority-authority_source` for the
+  full runbook.
+
+### Fixed
+
+- **Deadline engine: per-entry alarm isolation (Intent L S-L1/R-L1).** A regime-pinning
+  test proved the old `popExpired`-then-process loop silently lost every unprocessed
+  timer when one entry threw (no rollback, no retry — worse than assumed). Now: peek
+  without deleting; per-entry try/catch; CAS-style delete (`WHERE id AND deadline_ms`)
+  so a same-id lease renewal reschedule survives the post-process delete;
+  `escalate(lease_expired)` is appended before the release (signal-before-transition,
+  at-least-once); transient `processTimer` failures get a bounded retry (3 tries,
+  30s backoff) before a single `timer_failed` escalate surfaces the permanent case.
+  Note: room-authored `escalate` may now omit `task_ref` (needed for `timer_failed`);
+  participant-authored escalate validation is unchanged.
 ## [1.17.0] — 2026-07-11
 
 ### Changed

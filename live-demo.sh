@@ -101,6 +101,9 @@ $MESH keygen --id harry@hcproduct >/dev/null
 INVITE="$($MESH create-room "$ROOM_ID" --owner harry@hcproduct --url "$ROOM_URL" | awk '/Invite:/{print $NF}')"
 $MESH join "$ROOM_URL/v1/rooms/$ROOM_ID" "$INVITE" >/dev/null
 echo "Owner harry@hcproduct created room $ROOM_ID"
+# S-K5/S-K6: new-room genesis is write-closed; this open-collab demo lets agents
+# write the shared workspace, so the owner opens the write posture explicitly.
+$MESH fs config write open >/dev/null
 
 # ── seed the room charter (Intent I: situated arrival guidance) ────────────────
 CHARTER_DIR="$LIVE/charter"

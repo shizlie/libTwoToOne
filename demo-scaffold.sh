@@ -99,6 +99,7 @@ MESH_HOME="$OWNER_HOME" $MESH keygen --id harry@hcproduct >/dev/null
 INVITE="$(MESH_HOME="$OWNER_HOME" $MESH create-room "$ROOM_ID" --owner harry@hcproduct --url "$ROOM_URL" | awk '/Invite:/{print $NF}')"
 MESH_HOME="$OWNER_HOME" $MESH join "$ROOM_URL/v1/rooms/$ROOM_ID" "$INVITE" >/dev/null
 echo "Owner harry@hcproduct created room $ROOM_ID"
+MESH_HOME="$OWNER_HOME" $MESH fs config write open >/dev/null  # S-K5/S-K6: new-room genesis is write-closed; teammates write below
 
 # ── seed the SHARED WORKSPACE with the buggy todo-backend ──────────────────────────
 FIXTURE=""

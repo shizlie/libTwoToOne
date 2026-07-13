@@ -10148,8 +10148,8 @@ var require_utils = __commonJS((exports, module) => {
     }
     return ind;
   }
-  function removeDotSegments(path2) {
-    let input = path2;
+  function removeDotSegments(path4) {
+    let input = path4;
     const output = [];
     let nextSlash = -1;
     let len = 0;
@@ -10392,8 +10392,8 @@ var require_schemes = __commonJS((exports, module) => {
       wsComponent.secure = undefined;
     }
     if (wsComponent.resourceName) {
-      const [path2, query] = wsComponent.resourceName.split("?");
-      wsComponent.path = path2 && path2 !== "/" ? path2 : undefined;
+      const [path4, query] = wsComponent.resourceName.split("?");
+      wsComponent.path = path4 && path4 !== "/" ? path4 : undefined;
       wsComponent.query = query;
       wsComponent.resourceName = undefined;
     }
@@ -13568,12 +13568,12 @@ var require_dist = __commonJS((exports, module) => {
       throw new Error(`Unknown format "${name}"`);
     return f;
   };
-  function addFormats(ajv, list, fs2, exportName) {
+  function addFormats(ajv, list, fs4, exportName) {
     var _a2;
     var _b;
     (_a2 = (_b = ajv.opts.code).formats) !== null && _a2 !== undefined || (_b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`);
     for (const f of list)
-      ajv.addFormat(f, fs2[f]);
+      ajv.addFormat(f, fs4[f]);
   }
   module.exports = exports = formatsPlugin;
   Object.defineProperty(exports, "__esModule", { value: true });
@@ -13583,7 +13583,7 @@ var require_dist = __commonJS((exports, module) => {
 // src/main.ts
 import { readFileSync as readFileSync8, existsSync as existsSync7, statSync as statSync4 } from "node:fs";
 import { mkdirSync as mkdirSync4, openSync, writeFileSync as writeFileSync5, rmSync as rmSync3, realpathSync as realpathSync2 } from "node:fs";
-import { join as join7, resolve as resolve2 } from "node:path";
+import { join as join8, resolve as resolve2 } from "node:path";
 import { homedir as homedir2 } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -14907,6 +14907,12 @@ function normalizeDefaultAccess(v) {
   return { discover: "open", write: "open" };
 }
 
+// ../proto/src/limits.ts
+var MAX_FTS_MAX_FILE_BYTES = 5 * 1024 * 1024;
+var MIN_ARTIFACT_MAX_BYTES = 1024 * 1024;
+var MAX_ARTIFACT_MAX_BYTES = 500 * 1024 * 1024;
+var DEFAULT_ARTIFACT_MAX_BYTES = 25 * 1024 * 1024;
+
 // ../proto/src/performatives.ts
 var PERFORMATIVE_SET = {
   request: true,
@@ -14938,7 +14944,8 @@ var PERFORMATIVE_SET = {
   "decide.resolve": true,
   "system.decision_lapse": true,
   "system.role_lapse": true,
-  "escalate.ack": true
+  "escalate.ack": true,
+  "system.checkpoint": true
 };
 var ROOM_ONLY = {
   escalate: true,
@@ -14952,7 +14959,8 @@ var ROOM_ONLY = {
   "system.lease_clear": true,
   "system.revoke": true,
   "system.decision_lapse": true,
-  "system.role_lapse": true
+  "system.role_lapse": true,
+  "system.checkpoint": true
 };
 var PARTICIPANT_PERFORMATIVES = Object.keys(PERFORMATIVE_SET).filter((p) => !(p in ROOM_ONLY));
 // ../proto/src/machine.ts
@@ -15581,6 +15589,26 @@ class Consumer {
       }
     }
   }
+  async _pollComplete(since, waitS) {
+    const allEntries = [];
+    const allNotifies = [];
+    let cursorSince = since;
+    let first = true;
+    let last;
+    for (;; ) {
+      const page = first ? await this.client.getEntries({ since: cursorSince, wait_s: waitS }) : await this.client.getEntries({ since: cursorSince });
+      first = false;
+      last = page;
+      allEntries.push(...page.entries);
+      allNotifies.push(...page.notifies ?? []);
+      if (!page.notifies_truncated || page.entries.length === 0)
+        break;
+      if (!this.running)
+        break;
+      cursorSince = page.entries[page.entries.length - 1].seq;
+    }
+    return { entries: allEntries, notifies: allNotifies, head: last.head };
+  }
   _reportFailure(kind, err2) {
     const consecutive = kind === "ws" ? ++this.wsConsecutiveFailures : ++this.pollConsecutiveFailures;
     this.onError(kind, err2, consecutive);
@@ -15630,7 +15658,7 @@ class Consumer {
         return;
       const pollSince = this.streamCursor >= 0 ? this.streamCursor : 0;
       try {
-        const result = await this.client.getEntries({ since: pollSince, wait_s: 55 });
+        const result = await this._pollComplete(pollSince, 55);
         for (const entry of result.entries) {
           if (!this.running)
             return;
@@ -15909,8 +15937,8 @@ function checkLivenessCadence(cfg) {
 }
 
 // src/reanchor.ts
-import { existsSync as existsSync2, readFileSync as readFileSync4, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join3 } from "node:path";
+import { existsSync as existsSync3, readFileSync as readFileSync5, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join5 } from "node:path";
 
 // src/injectors/tmux.ts
 import { execFile } from "node:child_process";
@@ -15994,27 +16022,14 @@ async function injectWhenIdle(injector, line, opts = {}) {
   }
 }
 
-// ../cli/src/config.ts
-import * as fs from "node:fs";
+// ../engine/src/identity.ts
 import * as path from "node:path";
 import * as os from "node:os";
 function meshHome() {
   return process.env["MESH_HOME"] ?? path.join(os.homedir(), ".mesh");
 }
-function loadRooms(home) {
-  const p = path.join(home ?? meshHome(), "rooms.json");
-  if (!fs.existsSync(p))
-    return {};
-  try {
-    fs.chmodSync(p, 384);
-  } catch {}
-  return JSON.parse(fs.readFileSync(p, "utf8"));
-}
-function getRoom(roomId, home) {
-  return loadRooms(home)[roomId] ?? null;
-}
 
-// ../cli/src/client.ts
+// ../engine/src/client.ts
 var HTTP_STATUS_ERROR = {
   400: "bad_request",
   401: "unauthorized",
@@ -16174,11 +16189,33 @@ class MeshClient {
       params.set("wait_s", String(opts.wait_s));
     if (opts.mark)
       params.set("mark", "1");
+    if (opts.performative && opts.performative.length > 0)
+      params.set("performative", opts.performative.join(","));
+    if (opts.exclude && opts.exclude.length > 0)
+      params.set("exclude", opts.exclude.join(","));
     const qs = params.toString();
     const res = await this._get(`/entries${qs ? "?" + qs : ""}`);
     if (!res.ok)
       throw Object.assign(new Error(`GET /entries failed: ${res.status}`), { status: res.status });
     return res.json();
+  }
+  async getEntriesComplete(opts = {}) {
+    const allEntries = [];
+    const allNotifies = [];
+    let since = opts.since;
+    let last;
+    for (;; ) {
+      const page = await this.getEntries({ ...opts, since });
+      last = page;
+      allEntries.push(...page.entries);
+      allNotifies.push(...page.notifies);
+      if (!page.notifies_truncated || page.entries.length === 0)
+        break;
+      if (opts.signal?.aborted)
+        break;
+      since = page.entries[page.entries.length - 1].seq;
+    }
+    return { entries: allEntries, notifies: allNotifies, head: last.head, read_cursor: last.read_cursor };
   }
   async getState() {
     const res = await this._get("/state");
@@ -16325,6 +16362,15 @@ class MeshClient {
   async setAuthoritySource(source) {
     return this._postSeq("/config", { authority_source: source });
   }
+  async setArchiveThreshold(thresholdEntries) {
+    return this._postSeq("/config", { archive: { threshold_entries: thresholdEntries } });
+  }
+  async setFtsMaxFileBytes(bytes) {
+    return this._postSeq("/config", { fts_max_file_bytes: bytes });
+  }
+  async setArtifactMaxBytes(bytes) {
+    return this._postSeq("/config", { artifact_max_bytes: bytes });
+  }
   async revokeGrant(subject, path2) {
     return this._postSeq("/grants/revoke", { path_prefix: path2, subject });
   }
@@ -16354,11 +16400,11 @@ class MeshClient {
   static RECONNECT_BASE_MS = 500;
   static RECONNECT_MAX_MS = 8000;
   static MAX_HANDSHAKE_FAILURES = 5;
-  async* follow(since, signal) {
+  async* follow(since, signal, opts = {}) {
     const cursor = { seq: since ?? -1 };
     let handshakeFailures = 0;
     while (!signal?.aborted) {
-      const opened = yield* this.streamOnce(cursor, signal);
+      const opened = yield* this.streamOnce(cursor, signal, opts);
       if (signal?.aborted)
         break;
       if (opened) {
@@ -16370,11 +16416,15 @@ class MeshClient {
       await new Promise((r) => setTimeout(r, delay));
     }
   }
-  async* streamOnce(cursor, signal) {
+  async* streamOnce(cursor, signal, opts = {}) {
     const wsBase = this.opts.roomUrl.replace(/^http/, "ws");
     const params = new URLSearchParams({ token: this.opts.token });
     if (cursor.seq >= 0)
       params.set("since", String(cursor.seq));
+    if (opts.performative && opts.performative.length > 0)
+      params.set("performative", opts.performative.join(","));
+    if (opts.exclude && opts.exclude.length > 0)
+      params.set("exclude", opts.exclude.join(","));
     const url = `${wsBase}/stream?${params}`;
     const queue = [];
     let resolve = null;
@@ -16413,8 +16463,37 @@ class MeshClient {
           const item = queue.shift();
           if ("done" in item)
             return opened;
-          if (item.value.type === "entry")
+          if (item.value.type === "entry") {
+            if (item.value.entry.seq <= cursor.seq)
+              continue;
             cursor.seq = item.value.entry.seq;
+            yield item.value;
+            continue;
+          }
+          if (item.value.type === "backfill_truncated") {
+            let pageSince = item.value.resume_since;
+            try {
+              for (;; ) {
+                if (signal?.aborted)
+                  return opened;
+                const page = await this.getEntries({ since: pageSince, limit: 100, performative: opts.performative, exclude: opts.exclude });
+                if (page.entries.length === 0)
+                  break;
+                for (const e of page.entries) {
+                  if (e.seq <= cursor.seq)
+                    continue;
+                  cursor.seq = e.seq;
+                  yield { type: "entry", entry: e };
+                }
+                pageSince = page.entries[page.entries.length - 1].seq;
+                if (page.entries.length < 100)
+                  break;
+              }
+            } catch {
+              return opened;
+            }
+            continue;
+          }
           yield item.value;
         }
         const { promise, resolve: r } = Promise.withResolvers();
@@ -16430,14 +16509,13 @@ class MeshClient {
     }
   }
 }
-
-// ../cli/src/artifact.ts
+// ../engine/src/artifact.ts
 import { createHash } from "node:crypto";
 function sha256hex(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-// ../cli/src/fs.ts
+// ../engine/src/fs.ts
 function resolveNode(tree, repopath) {
   const id = normalizeId(repopath);
   return tree.find((n) => n.path === id);
@@ -16450,28 +16528,295 @@ function hashFromRef(content_hash) {
     throw new Error(`not an r2 content ref: ${content_hash}`);
   return m[1];
 }
+// ../engine/src/edit-base.ts
+import * as fs from "node:fs";
+import * as path2 from "node:path";
+function sidecarPath(roomId, repopath, home) {
+  for (const [label, raw] of [["roomId", roomId], ["repopath", repopath]]) {
+    let decoded;
+    try {
+      decoded = decodeURIComponent(raw);
+    } catch {
+      decoded = raw;
+    }
+    if (decoded === "." || decoded === ".." || decoded.split(/[/\\]/).some((seg) => seg === "..")) {
+      throw new Error(`sidecarPath: illegal ${label} "${raw}"`);
+    }
+  }
+  return path2.join(home ?? meshHome(), "edit-base", roomId, encodeURIComponent(repopath));
+}
+function readSidecar(roomId, repopath, home) {
+  const p = sidecarPath(roomId, repopath, home);
+  if (!fs.existsSync(p))
+    return;
+  try {
+    fs.chmodSync(p, 384);
+  } catch {}
+  try {
+    return JSON.parse(fs.readFileSync(p, "utf8"));
+  } catch {
+    return;
+  }
+}
+
+// ../engine/src/sync.ts
+function classifySync(input) {
+  if (input.tipGated)
+    return "gated";
+  if (input.ignoredLocally)
+    return "ignored";
+  const { localHash, baseTipHash, tipHash } = input;
+  const L3 = localHash !== undefined;
+  const B = baseTipHash !== undefined;
+  const T = tipHash !== undefined;
+  if (!L3 && !B && !T)
+    return "vacuous";
+  if (L3 && !B && !T)
+    return "untracked";
+  if (!L3 && !B && T)
+    return "room-only";
+  if (!L3 && B && !T)
+    return "orphan-base";
+  if (!L3 && B && T)
+    return "local-deleted";
+  if (L3 && B && !T)
+    return localHash === baseTipHash ? "room-deleted-clean" : "room-deleted-dirty";
+  if (L3 && !B && T)
+    return localHash === tipHash ? "adopt" : "never-synced";
+  const lb = localHash === baseTipHash;
+  const bt = baseTipHash === tipHash;
+  const lt = localHash === tipHash;
+  if (lb && bt)
+    return "in-sync";
+  if (!lb && bt)
+    return "ahead";
+  if (lb && !bt)
+    return "behind";
+  if (lt)
+    return "converged";
+  return "diverged";
+}
+// ../engine/src/workspace-cache.ts
+function isCacheFresh(cachedHash, treeHash) {
+  return cachedHash !== undefined && cachedHash === treeHash;
+}
+var DEFAULT_MAX_BYTES = 512 * 1024 * 1024;
+var DEFAULT_IDLE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+class WorkspaceCache {
+  _client;
+  _maxBytes;
+  _idleTtlMs;
+  _mirror;
+  _entries = new Map;
+  _totalBytes = 0;
+  constructor(_rootDir, client, opts) {
+    this._client = client;
+    this._maxBytes = opts?.maxBytes ?? DEFAULT_MAX_BYTES;
+    this._idleTtlMs = opts?.idleTtlMs ?? DEFAULT_IDLE_TTL_MS;
+    this._mirror = opts?.mirror;
+  }
+  async read(path3) {
+    let treeHash;
+    if (this._mirror !== undefined) {
+      const node = this._mirror.get(path3);
+      if (node === undefined) {
+        throw new Error(`WorkspaceCache.read: path "${path3}" not found in room tree`);
+      }
+      treeHash = node.content_hash;
+    } else {
+      const treeResult = await this._client.getTree(path3);
+      if (!("tree" in treeResult)) {
+        throw new Error(`WorkspaceCache.read: getTree failed for path "${path3}": ${treeResult.error}`);
+      }
+      const node = resolveNode(treeResult.tree, path3);
+      if (node === undefined) {
+        throw new Error(`WorkspaceCache.read: path "${path3}" not found in room tree`);
+      }
+      treeHash = node.content_hash;
+    }
+    if (treeHash === undefined) {
+      throw new Error(`WorkspaceCache.read: path "${path3}" is content-gated (no read grant) — cannot hydrate`);
+    }
+    const existing = this._entries.get(path3);
+    if (isCacheFresh(existing?.hash, treeHash)) {
+      existing.atime = Date.now();
+      return existing.bytes;
+    }
+    const rawHash = hashFromRef(treeHash);
+    const blobResult = await this._client.getArtifact(rawHash);
+    if (!(blobResult instanceof Uint8Array)) {
+      throw new Error(`WorkspaceCache.read: getArtifact failed for "${path3}" (hash ${rawHash}): ${blobResult.error}`);
+    }
+    if (existing !== undefined) {
+      this._totalBytes -= existing.bytes.byteLength;
+      this._entries.delete(path3);
+    }
+    const entry = { hash: treeHash, bytes: blobResult, atime: Date.now() };
+    this._entries.set(path3, entry);
+    this._totalBytes += blobResult.byteLength;
+    this._evict();
+    return blobResult;
+  }
+  isWarm(path3, hash) {
+    return this._entries.get(path3)?.hash === hash;
+  }
+  async warm(path3, hash) {
+    if (this.isWarm(path3, hash))
+      return;
+    const rawHash = hashFromRef(hash);
+    const blobResult = await this._client.getArtifact(rawHash);
+    if (!(blobResult instanceof Uint8Array)) {
+      throw new Error(`WorkspaceCache.warm: getArtifact failed for "${path3}" (hash ${rawHash}): ${blobResult.error}`);
+    }
+    const existing = this._entries.get(path3);
+    if (existing !== undefined) {
+      this._totalBytes -= existing.bytes.byteLength;
+      this._entries.delete(path3);
+    }
+    const entry = { hash, bytes: blobResult, atime: Date.now() };
+    this._entries.set(path3, entry);
+    this._totalBytes += blobResult.byteLength;
+    this._evict();
+  }
+  async ls(prefix) {
+    const result = await this._client.getTree(prefix);
+    if (!("tree" in result)) {
+      throw new Error(`WorkspaceCache.ls: getTree failed: ${result.error}`);
+    }
+    return result.tree;
+  }
+  async hydrate(prefix) {
+    const result = await this._client.getTree(prefix);
+    if (!("tree" in result)) {
+      throw new Error(`WorkspaceCache.hydrate: getTree failed: ${result.error}`);
+    }
+    const paths = [];
+    for (const node of result.tree) {
+      await this.read(node.path);
+      paths.push(node.path);
+    }
+    return paths;
+  }
+  _evict() {
+    const now = Date.now();
+    for (const [path3, entry] of this._entries) {
+      if (now - entry.atime > this._idleTtlMs) {
+        this._totalBytes -= entry.bytes.byteLength;
+        this._entries.delete(path3);
+      }
+    }
+    while (this._totalBytes > this._maxBytes && this._entries.size > 0) {
+      let oldestPath;
+      let oldestAtime = Infinity;
+      for (const [p, e] of this._entries) {
+        if (e.atime < oldestAtime) {
+          oldestAtime = e.atime;
+          oldestPath = p;
+        }
+      }
+      if (oldestPath === undefined)
+        break;
+      const evicted = this._entries.get(oldestPath);
+      this._totalBytes -= evicted.bytes.byteLength;
+      this._entries.delete(oldestPath);
+    }
+  }
+}
+// ../engine/src/tree-mirror.ts
+var TREE_INERT_FILE_PERFORMATIVES = { "file.lock": true, "file.unlock": true, "file.request": true };
+
+class TreeMirror {
+  _nodes = new Map;
+  _headSeq = 0;
+  get headSeq() {
+    return this._headSeq;
+  }
+  seed(rows) {
+    this._nodes.clear();
+    let maxSeq = 0;
+    for (const r of rows) {
+      this._nodes.set(normalizeId(r.path), {
+        size: r.size,
+        content_hash: r.content_hash,
+        tip_seq: r.tip_seq,
+        tip_ts: r.tip_ts
+      });
+      if (r.tip_seq > maxSeq)
+        maxSeq = r.tip_seq;
+    }
+    this._headSeq = maxSeq;
+  }
+  fold(entry) {
+    if (entry.seq !== this._headSeq + 1)
+      return false;
+    const performative = entry.submission.performative;
+    if (performative === "file.write") {
+      const d = entry.submission.data;
+      if (!d || typeof d.path !== "string" || typeof d.content_hash !== "string" || typeof d.size !== "number") {
+        return false;
+      }
+      this._nodes.set(normalizeId(d.path), {
+        size: d.size,
+        content_hash: d.content_hash,
+        tip_seq: entry.seq,
+        tip_ts: entry.room_ts
+      });
+    } else if (performative === "file.delete") {
+      const d = entry.submission.data;
+      if (!d || typeof d.path !== "string")
+        return false;
+      this._nodes.delete(normalizeId(d.path));
+    } else if (performative.startsWith("file.") && TREE_INERT_FILE_PERFORMATIVES[performative] !== true) {
+      return false;
+    }
+    this._headSeq = entry.seq;
+    return true;
+  }
+  get(path3) {
+    return this._nodes.get(normalizeId(path3));
+  }
+  getAllPaths() {
+    return [...this._nodes.keys()];
+  }
+}
+// ../cli/src/config.ts
+import * as fs3 from "node:fs";
+import * as path3 from "node:path";
+function loadRooms(home) {
+  const p = path3.join(home ?? meshHome(), "rooms.json");
+  if (!fs3.existsSync(p))
+    return {};
+  try {
+    fs3.chmodSync(p, 384);
+  } catch {}
+  return JSON.parse(fs3.readFileSync(p, "utf8"));
+}
+function getRoom(roomId, home) {
+  return loadRooms(home)[roomId] ?? null;
+}
 
 // ../cli/src/brief.ts
-async function authorOf(client, seq) {
+async function authorOf(client2, seq) {
   try {
-    const result = await client.getEntries({ since: seq - 1, limit: 1 });
+    const result = await client2.getEntries({ since: seq - 1, limit: 1 });
     const entry = result.entries.find((e) => e.seq === seq);
     return entry?.submission.sender ?? null;
   } catch {
     return null;
   }
 }
-async function resolveMyRoles(client, selfId) {
+async function resolveMyRoles(client2, selfId) {
   try {
-    const rows = await client.listRoles();
+    const rows = await client2.listRoles();
     return Array.isArray(rows) ? myRoles(rows, selfId) : [];
   } catch {
     return [];
   }
 }
-async function resolveMyWriteGrants(client, selfId, roles) {
+async function resolveMyWriteGrants(client2, selfId, roles) {
   try {
-    const rows = await client.listGrants();
+    const rows = await client2.listGrants();
     if (!Array.isArray(rows))
       return null;
     const subjects = new Set([selfId, ...roles.map((r) => `role:${r}`)]);
@@ -16480,9 +16825,9 @@ async function resolveMyWriteGrants(client, selfId, roles) {
     return null;
   }
 }
-async function resolveActiveLeases(client) {
+async function resolveActiveLeases(client2) {
   try {
-    const rows = await client.listLeases();
+    const rows = await client2.listLeases();
     if (!Array.isArray(rows))
       return null;
     return rows.map((r) => ({ path: r.path, holder: r.holder, lease_expires: r.lease_expires }));
@@ -16490,10 +16835,10 @@ async function resolveActiveLeases(client) {
     return null;
   }
 }
-async function resolveWorkspaceSection(client, selfId, roles, posture) {
+async function resolveWorkspaceSection(client2, selfId, roles, posture) {
   const [writeGrants, leases] = await Promise.all([
-    resolveMyWriteGrants(client, selfId, roles),
-    resolveActiveLeases(client)
+    resolveMyWriteGrants(client2, selfId, roles),
+    resolveActiveLeases(client2)
   ]);
   return { posture, writeGrants, leases };
 }
@@ -16531,18 +16876,18 @@ function buildBriefInput(state, selfId, roles, roomId, room, roleCharters, works
 // src/reanchor.ts
 var LAST_WAKE_FILE = "last_wake.json";
 function isFirstWakeEver(stateDir) {
-  return !existsSync2(join3(stateDir, "wake_cursor.json")) && !existsSync2(join3(stateDir, LAST_WAKE_FILE));
+  return !existsSync3(join5(stateDir, "wake_cursor.json")) && !existsSync3(join5(stateDir, LAST_WAKE_FILE));
 }
 function loadLastWakeTs(stateDir) {
   try {
-    const raw = readFileSync4(join3(stateDir, LAST_WAKE_FILE), "utf8");
+    const raw = readFileSync5(join5(stateDir, LAST_WAKE_FILE), "utf8");
     return JSON.parse(raw).ts;
   } catch {
     return null;
   }
 }
 function stampWakeDelivered(stateDir, ts) {
-  writeFileSync2(join3(stateDir, LAST_WAKE_FILE), JSON.stringify({ ts }));
+  writeFileSync3(join5(stateDir, LAST_WAKE_FILE), JSON.stringify({ ts }));
 }
 function shouldReanchor(brief, lastWakeTs, now) {
   if (!brief.arrival_pointer || brief.reanchor_after_s <= 0)
@@ -16551,11 +16896,11 @@ function shouldReanchor(brief, lastWakeTs, now) {
     return false;
   return now - lastWakeTs >= brief.reanchor_after_s * 1000;
 }
-async function buildWakeLine(config, client, stateDir, digest, now) {
+async function buildWakeLine(config, client2, stateDir, digest, now) {
   const last = loadLastWakeTs(stateDir);
   if (!shouldReanchor(config.brief, last, now))
     return digest;
-  const roles = await resolveMyRoles(client, config.identity.id);
+  const roles = await resolveMyRoles(client2, config.identity.id);
   return buildArrivalPointer(config.identity.id, roles, config.room.id);
 }
 var wakeQueues = new Map;
@@ -16576,9 +16921,9 @@ function withWakeLock(stateDir, fn) {
 function injectOpts(config) {
   return { busyRetryS: config.wake.tmux?.busy_retry_s, maxBusyWaitS: config.wake.tmux?.max_busy_wait_s };
 }
-async function deliverWake(config, client, injector, stateDir, digest, now) {
+async function deliverWake(config, client2, injector, stateDir, digest, now) {
   return withWakeLock(stateDir, async () => {
-    const line = await buildWakeLine(config, client, stateDir, digest, now);
+    const line = await buildWakeLine(config, client2, stateDir, digest, now);
     const result = await injectWhenIdle(injector, line, injectOpts(config));
     if (result === "injected")
       stampWakeDelivered(stateDir, now);
@@ -16609,12 +16954,12 @@ function createOmpInjector(opts) {
 }
 
 // src/injectors/state.ts
-import { statSync, readFileSync as readFileSync5 } from "node:fs";
+import { statSync, readFileSync as readFileSync6 } from "node:fs";
 var AGENT_STATE_FILE = "agent_state";
 function readHookState(file, busyStaleMs) {
   let raw;
   try {
-    raw = readFileSync5(file, "utf8").trim();
+    raw = readFileSync6(file, "utf8").trim();
   } catch {
     return null;
   }
@@ -16658,127 +17003,12 @@ class HookStateInjector {
 
 // src/ipc.ts
 import { createServer } from "node:net";
-import { existsSync as existsSync4, unlinkSync, statSync as statSync2, chmodSync as chmodSync3 } from "node:fs";
+import { existsSync as existsSync5, unlinkSync, statSync as statSync2, chmodSync as chmodSync4 } from "node:fs";
 import { basename as pathBasename } from "node:path";
 
 // src/fs-shim.ts
 import * as nodePath from "node:path";
-import { writeFileSync as writeFileSync3, chmodSync as chmodSync2, existsSync as existsSync3, realpathSync } from "node:fs";
-function isCacheFresh(cachedHash, treeHash) {
-  return cachedHash !== undefined && cachedHash === treeHash;
-}
-var DEFAULT_MAX_BYTES = 512 * 1024 * 1024;
-var DEFAULT_IDLE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-
-class WorkspaceCache {
-  _client;
-  _maxBytes;
-  _idleTtlMs;
-  _entries = new Map;
-  _totalBytes = 0;
-  constructor(_rootDir, client, opts) {
-    this._client = client;
-    this._maxBytes = opts?.maxBytes ?? DEFAULT_MAX_BYTES;
-    this._idleTtlMs = opts?.idleTtlMs ?? DEFAULT_IDLE_TTL_MS;
-  }
-  async read(path2) {
-    const treeResult = await this._client.getTree(path2);
-    if (!("tree" in treeResult)) {
-      throw new Error(`WorkspaceCache.read: getTree failed for path "${path2}": ${treeResult.error}`);
-    }
-    const node = resolveNode(treeResult.tree, path2);
-    if (node === undefined) {
-      throw new Error(`WorkspaceCache.read: path "${path2}" not found in room tree`);
-    }
-    const treeHash = node.content_hash;
-    if (treeHash === undefined) {
-      throw new Error(`WorkspaceCache.read: path "${path2}" is content-gated (no read grant) — cannot hydrate`);
-    }
-    const existing = this._entries.get(path2);
-    if (isCacheFresh(existing?.hash, treeHash)) {
-      existing.atime = Date.now();
-      return existing.bytes;
-    }
-    const rawHash = hashFromRef(treeHash);
-    const blobResult = await this._client.getArtifact(rawHash);
-    if (!(blobResult instanceof Uint8Array)) {
-      throw new Error(`WorkspaceCache.read: getArtifact failed for "${path2}" (hash ${rawHash}): ${blobResult.error}`);
-    }
-    if (existing !== undefined) {
-      this._totalBytes -= existing.bytes.byteLength;
-      this._entries.delete(path2);
-    }
-    const entry = { hash: treeHash, bytes: blobResult, atime: Date.now() };
-    this._entries.set(path2, entry);
-    this._totalBytes += blobResult.byteLength;
-    this._evict();
-    return blobResult;
-  }
-  isWarm(path2, hash) {
-    return this._entries.get(path2)?.hash === hash;
-  }
-  async warm(path2, hash) {
-    if (this.isWarm(path2, hash))
-      return;
-    const rawHash = hashFromRef(hash);
-    const blobResult = await this._client.getArtifact(rawHash);
-    if (!(blobResult instanceof Uint8Array)) {
-      throw new Error(`WorkspaceCache.warm: getArtifact failed for "${path2}" (hash ${rawHash}): ${blobResult.error}`);
-    }
-    const existing = this._entries.get(path2);
-    if (existing !== undefined) {
-      this._totalBytes -= existing.bytes.byteLength;
-      this._entries.delete(path2);
-    }
-    const entry = { hash, bytes: blobResult, atime: Date.now() };
-    this._entries.set(path2, entry);
-    this._totalBytes += blobResult.byteLength;
-    this._evict();
-  }
-  async ls(prefix) {
-    const result = await this._client.getTree(prefix);
-    if (!("tree" in result)) {
-      throw new Error(`WorkspaceCache.ls: getTree failed: ${result.error}`);
-    }
-    return result.tree;
-  }
-  async hydrate(prefix) {
-    const result = await this._client.getTree(prefix);
-    if (!("tree" in result)) {
-      throw new Error(`WorkspaceCache.hydrate: getTree failed: ${result.error}`);
-    }
-    const paths = [];
-    for (const node of result.tree) {
-      await this.read(node.path);
-      paths.push(node.path);
-    }
-    return paths;
-  }
-  _evict() {
-    const now = Date.now();
-    for (const [path2, entry] of this._entries) {
-      if (now - entry.atime > this._idleTtlMs) {
-        this._totalBytes -= entry.bytes.byteLength;
-        this._entries.delete(path2);
-      }
-    }
-    while (this._totalBytes > this._maxBytes && this._entries.size > 0) {
-      let oldestPath;
-      let oldestAtime = Infinity;
-      for (const [p, e] of this._entries) {
-        if (e.atime < oldestAtime) {
-          oldestAtime = e.atime;
-          oldestPath = p;
-        }
-      }
-      if (oldestPath === undefined)
-        break;
-      const evicted = this._entries.get(oldestPath);
-      this._totalBytes -= evicted.bytes.byteLength;
-      this._entries.delete(oldestPath);
-    }
-  }
-}
+import { writeFileSync as writeFileSync4, chmodSync as chmodSync3, existsSync as existsSync4, realpathSync } from "node:fs";
 var FIND_FAIL_LOUD = new Set([
   "-exec",
   "-execdir",
@@ -17117,15 +17347,15 @@ function installShims(binDir, socketPath, workspace) {
   for (const tool of ["ls", "grep", "cat", "find"]) {
     const script = makeShimScript(tool, socketPath, workspace);
     const dest = nodePath.join(binDir, tool);
-    writeFileSync3(dest, script, { encoding: "utf8", mode: 493 });
-    chmodSync2(dest, 493);
+    writeFileSync4(dest, script, { encoding: "utf8", mode: 493 });
+    chmodSync3(dest, 493);
   }
 }
 
 // src/ipc.ts
 function startIpcServer(opts) {
-  const { client, socketPath, selfId, roomId, cache } = opts;
-  if (existsSync4(socketPath)) {
+  const { client: client2, socketPath, selfId, roomId, cache } = opts;
+  if (existsSync5(socketPath)) {
     try {
       unlinkSync(socketPath);
     } catch {}
@@ -17161,7 +17391,7 @@ function startIpcServer(opts) {
       reject(new Error(`[ipc] ${reason}`));
     }
     try {
-      chmodSync3(socketPath, 384);
+      chmodSync4(socketPath, 384);
     } catch (err2) {
       abortServer(`chmod 0600 failed: ${String(err2)}`);
       return;
@@ -17193,7 +17423,7 @@ function startIpcServer(opts) {
       const since = typeof p["since"] === "number" ? p["since"] : undefined;
       const mark = p["mark"] !== false;
       const limit = typeof p["limit"] === "number" ? p["limit"] : 50;
-      const result = await client.getEntries({ since, mark, limit });
+      const result = await client2.getEntries({ since, mark, limit });
       const lines = result.entries.map((e) => {
         const s = e.submission;
         const task = s.task_ref ? ` task=${s.task_ref}` : "";
@@ -17213,30 +17443,30 @@ function startIpcServer(opts) {
         data: p["data"],
         contingent_on: p["contingent_on"]
       };
-      return client.postEntry(input);
+      return client2.postEntry(input);
     }
     if (method === "room_claim") {
-      return client.postEntry({
+      return client2.postEntry({
         performative: "claim",
         task_ref: p["task_ref"]
       });
     }
     if (method === "room_release") {
-      return client.postEntry({
+      return client2.postEntry({
         performative: "release",
         task_ref: p["task_ref"]
       });
     }
     if (method === "room_tasks") {
-      const state = await client.getState();
+      const state = await client2.getState();
       const my_tasks = selfId ? state.claims.filter((c) => c.holder === selfId).map((c) => c.task_ref) : [];
       return { ...state, self_id: selfId ?? null, my_tasks };
     }
     if (method === "room_watch") {
-      return client.postWatch(p["predicate"]);
+      return client2.postWatch(p["predicate"]);
     }
     if (method === "room_roster") {
-      const state = await client.getState();
+      const state = await client2.getState();
       return {
         roster: state.roster,
         defaults: state.defaults,
@@ -17244,35 +17474,35 @@ function startIpcServer(opts) {
       };
     }
     if (method === "room_roles") {
-      return { roles: await client.listRoles() };
+      return { roles: await client2.listRoles() };
     }
     if (method === "room_brief") {
       if (!cache)
         throw { code: -32601, message: "room_brief: no workspace cache configured" };
-      const state = await client.getState();
-      const rolesResult = await client.listRoles();
+      const state = await client2.getState();
+      const rolesResult = await client2.listRoles();
       const bindings = Array.isArray(rolesResult) ? rolesResult : [];
       const roleFilter = typeof p["role"] === "string" ? p["role"] : undefined;
       const roles = roleFilter !== undefined ? [roleFilter] : myRoles(bindings, selfId ?? "");
       const tree = await cache.ls("charter/");
       const byPath = new Map(tree.map((n) => [normalizeId(n.path), n]));
-      const readSection = async (path2) => {
-        const node = byPath.get(normalizeId(path2));
+      const readSection = async (path4) => {
+        const node = byPath.get(normalizeId(path4));
         if (!node)
-          return { path: path2, content: null, tip_seq: null, author: null };
+          return { path: path4, content: null, tip_seq: null, author: null };
         let content;
         try {
-          content = Buffer.from(await cache.read(path2)).toString("utf8");
+          content = Buffer.from(await cache.read(path4)).toString("utf8");
         } catch (err2) {
-          console.error(`[meshl] room_brief: charter read failed for ${path2}; degrading to no-charter:`, err2);
-          return { path: path2, content: null, tip_seq: null, author: null };
+          console.error(`[meshl] room_brief: charter read failed for ${path4}; degrading to no-charter:`, err2);
+          return { path: path4, content: null, tip_seq: null, author: null };
         }
-        const author = await authorOf(client, node.tip_seq);
-        return { path: path2, content, tip_seq: node.tip_seq, author };
+        const author = await authorOf(client2, node.tip_seq);
+        return { path: path4, content, tip_seq: node.tip_seq, author };
       };
       const room = await readSection(CHARTER_ROOM_PATH);
       const roleCharters = await Promise.all(roles.map((role) => readSection(charterRolePath(role))));
-      const workspace = await resolveWorkspaceSection(client, selfId ?? "", roles, normalizeDefaultAccess(state.defaults.default_access).write);
+      const workspace = await resolveWorkspaceSection(client2, selfId ?? "", roles, normalizeDefaultAccess(state.defaults.default_access).write);
       return buildBriefInput(state, selfId ?? "", roles, roomId ?? "", room, roleCharters, workspace, Date.now());
     }
     if (method === "fs_ls") {
@@ -17297,7 +17527,7 @@ function startIpcServer(opts) {
       const query = typeof p["query"] === "string" ? p["query"] : "";
       const prefix = typeof p["prefix"] === "string" ? p["prefix"] : undefined;
       const limit = typeof p["limit"] === "number" ? p["limit"] : undefined;
-      return client.search(query, { prefix, limit });
+      return client2.search(query, { prefix, limit });
     }
     if (method === "fs_read") {
       if (!cache)
@@ -17338,7 +17568,7 @@ function startIpcServer(opts) {
           return { kind: "metadata", nodes, fmt: decision.oneLevel ? "basename" : "path" };
         }
         case "search": {
-          const res = await client.search(decision.query, { prefix: decision.prefix });
+          const res = await client2.search(decision.query, { prefix: decision.prefix });
           if (!("results" in res))
             return { kind: "fail_loud", reason: res.error };
           return { kind: "search", results: res.results };
@@ -17862,8 +18092,8 @@ function getErrorMap() {
 }
 // ../../node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path2, errorMaps, issueData } = params;
-  const fullPath = [...path2, ...issueData.path || []];
+  const { data, path: path4, errorMaps, issueData } = params;
+  const fullPath = [...path4, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -17975,11 +18205,11 @@ var errorUtil;
 
 // ../../node_modules/zod/v3/types.js
 class ParseInputLazyPath {
-  constructor(parent, value, path2, key) {
+  constructor(parent, value, path4, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path2;
+    this._path = path4;
     this._key = key;
   }
   get path() {
@@ -21438,7 +21668,7 @@ __export(exports_util, {
   numKeys: () => numKeys,
   nullish: () => nullish,
   normalizeParams: () => normalizeParams,
-  merge: () => merge,
+  merge: () => merge2,
   jsonStringifyReplacer: () => jsonStringifyReplacer,
   joinValues: () => joinValues,
   issue: () => issue,
@@ -21553,10 +21783,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path2) {
-  if (!path2)
+function getElementAtPath(obj, path4) {
+  if (!path4)
     return obj;
-  return path2.reduce((acc, key) => acc?.[key], obj);
+  return path4.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -21795,7 +22025,7 @@ function extend(schema, shape) {
   };
   return clone(schema, def);
 }
-function merge(a, b) {
+function merge2(a, b) {
   return clone(a, {
     ...a._zod.def,
     get shape() {
@@ -21872,11 +22102,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path2, issues) {
+function prefixIssues(path4, issues) {
   return issues.map((iss) => {
     var _a2;
     (_a2 = iss).path ?? (_a2.path = []);
-    iss.path.unshift(path2);
+    iss.path.unshift(path4);
     return iss;
   });
 }
@@ -30931,76 +31161,7 @@ function startDutyLoop(getState, selfId, configRoles, intervalMs, inject, getLea
 
 // src/workset.ts
 import { existsSync as existsSync6, readFileSync as readFileSync7, statSync as statSync3 } from "node:fs";
-import { join as join6 } from "node:path";
-
-// ../cli/src/edit-base.ts
-import * as fs2 from "node:fs";
-import * as path2 from "node:path";
-function sidecarPath(roomId, repopath, home) {
-  for (const [label, raw] of [["roomId", roomId], ["repopath", repopath]]) {
-    let decoded;
-    try {
-      decoded = decodeURIComponent(raw);
-    } catch {
-      decoded = raw;
-    }
-    if (decoded === "." || decoded === ".." || decoded.split(/[/\\]/).some((seg) => seg === "..")) {
-      throw new Error(`sidecarPath: illegal ${label} "${raw}"`);
-    }
-  }
-  return path2.join(home ?? meshHome(), "edit-base", roomId, encodeURIComponent(repopath));
-}
-function readSidecar(roomId, repopath, home) {
-  const p = sidecarPath(roomId, repopath, home);
-  if (!fs2.existsSync(p))
-    return;
-  try {
-    fs2.chmodSync(p, 384);
-  } catch {}
-  try {
-    return JSON.parse(fs2.readFileSync(p, "utf8"));
-  } catch {
-    return;
-  }
-}
-
-// ../cli/src/sync.ts
-function classifySync(input) {
-  if (input.tipGated)
-    return "gated";
-  const { localHash, baseTipHash, tipHash } = input;
-  const L3 = localHash !== undefined;
-  const B = baseTipHash !== undefined;
-  const T = tipHash !== undefined;
-  if (!L3 && !B && !T)
-    return "vacuous";
-  if (L3 && !B && !T)
-    return "untracked";
-  if (!L3 && !B && T)
-    return "room-only";
-  if (!L3 && B && !T)
-    return "orphan-base";
-  if (!L3 && B && T)
-    return "local-deleted";
-  if (L3 && B && !T)
-    return localHash === baseTipHash ? "room-deleted-clean" : "room-deleted-dirty";
-  if (L3 && !B && T)
-    return localHash === tipHash ? "adopt" : "never-synced";
-  const lb = localHash === baseTipHash;
-  const bt = baseTipHash === tipHash;
-  const lt = localHash === tipHash;
-  if (lb && bt)
-    return "in-sync";
-  if (!lb && bt)
-    return "ahead";
-  if (lb && !bt)
-    return "behind";
-  if (lt)
-    return "converged";
-  return "diverged";
-}
-
-// src/workset.ts
+import { join as join7 } from "node:path";
 var CONFLICT_STATES = { diverged: true, "never-synced": true };
 
 class WorksetScanner {
@@ -31066,7 +31227,7 @@ class WorksetScanner {
     }
   }
   async _tick() {
-    const sidecarDir = join6(this.meshHomeDir, "edit-base", this.roomId);
+    const sidecarDir = join7(this.meshHomeDir, "edit-base", this.roomId);
     if (!existsSync6(sidecarDir)) {
       if (!this.warnedNoSidecarDir) {
         this.log(`[workset] room "${this.roomId}" has no local sync history yet (no edit-base dir) — ` + `skipping tree-diff scan until \`mesh fs get/put/edit\` seeds one`);
@@ -31100,7 +31261,7 @@ class WorksetScanner {
     this.onScanCb?.(this.latest);
   }
   localHash(repoPath) {
-    const abs = join6(this.workspaceRoot, repoPath);
+    const abs = join7(this.workspaceRoot, repoPath);
     let st;
     try {
       st = statSync3(abs);
@@ -31125,7 +31286,7 @@ class WorksetScanner {
 
 // src/main.ts
 function resolveHome(p) {
-  return p.startsWith("~/") ? join7(homedir2(), p.slice(2)) : resolve2(p);
+  return p.startsWith("~/") ? join8(homedir2(), p.slice(2)) : resolve2(p);
 }
 function flag(args, name) {
   const idx = args.indexOf(name);
@@ -31180,12 +31341,12 @@ function buildInjector(config2) {
     return createOmpInjector(opts);
   return new TmuxInjector({ ...opts, idlePromptRegex: /.*/ });
 }
-async function registerWatches(client, config2) {
+async function registerWatches(client2, config2) {
   const watches = config2.subscriptions.watches;
   if (!watches || watches.length === 0)
     return;
   for (const predicate of watches) {
-    const result = await client.postWatch(predicate);
+    const result = await client2.postWatch(predicate);
     if (!result.ok) {
       console.error(`[meshl] watch registration warning: ${result.error} — ${result.detail}`);
     }
@@ -31201,7 +31362,7 @@ function livenessOptsFrom(config2, stateDir) {
     intervalMs: config2.liveness.interval_s * 1000,
     stuckAfterMs: config2.liveness.stuck_after_s * 1000,
     debounceMs: config2.liveness.debounce_s * 1000,
-    hookStateFile: config2.wake.tmux ? join7(stateDir, AGENT_STATE_FILE) : null
+    hookStateFile: config2.wake.tmux ? join8(stateDir, AGENT_STATE_FILE) : null
   };
 }
 async function cmdRun(configPath, opts) {
@@ -31213,7 +31374,7 @@ async function cmdRun(configPath, opts) {
   const stateDir = resolveHome(config2.state_dir);
   mkdirSync4(stateDir, { recursive: true, mode: 448 });
   if (!opts.foreground && process.env["MESHL_DETACHED"] !== "1") {
-    const pidPath = join7(stateDir, "daemon.pid");
+    const pidPath = join8(stateDir, "daemon.pid");
     if (existsSync7(pidPath)) {
       const existing = parseInt(readFileSync8(pidPath, "utf8").trim(), 10);
       if (Number.isInteger(existing) && pidAlive(existing)) {
@@ -31228,7 +31389,7 @@ async function cmdRun(configPath, opts) {
         console.log(`[meshl] replacing running daemon (pid ${existing})`);
       }
     }
-    const logPath = join7(stateDir, "daemon.log");
+    const logPath = join8(stateDir, "daemon.log");
     const out = openSync(logPath, "a");
     const child = spawn(process.execPath, [process.argv[1], "run", "--config", configPath, "--foreground"], {
       detached: true,
@@ -31243,10 +31404,10 @@ async function cmdRun(configPath, opts) {
     console.log(`  stop: meshl stop --config ${configPath}`);
     return;
   }
-  const client = buildClient(config2, secretBytes, roomEntry.token);
-  await registerWatches(client, config2);
+  const client2 = buildClient(config2, secretBytes, roomEntry.token);
+  await registerWatches(client2, config2);
   try {
-    const startupState = await client.getState();
+    const startupState = await client2.getState();
     const cadenceWarning = checkHeartbeatCadence(config2.heartbeat.interval_s, startupState.defaults.lease_ttl_s);
     if (cadenceWarning)
       console.warn(cadenceWarning);
@@ -31256,10 +31417,10 @@ async function cmdRun(configPath, opts) {
   const livenessWarn = checkLivenessCadence(config2.liveness);
   if (livenessWarn !== null)
     console.warn(`[meshl] ${livenessWarn}`);
-  const socketPath = join7(stateDir, "daemon.sock");
-  const cache = new WorkspaceCache(join7(stateDir, "fs", config2.room.id), client);
+  const socketPath = join8(stateDir, "daemon.sock");
+  const cache = new WorkspaceCache(join8(stateDir, "fs", config2.room.id), client2);
   const ipcHandle = await startIpcServer({
-    client,
+    client: client2,
     stateDir,
     socketPath,
     selfId: config2.identity.id,
@@ -31267,29 +31428,29 @@ async function cmdRun(configPath, opts) {
     cache
   });
   const worksetScanner = config2.workset?.enabled === false ? null : new WorksetScanner({
-    client,
+    client: client2,
     roomId: config2.room.id,
     workspaceRoot: resolveHome(config2.workspace?.root ?? "."),
     intervalMs: (config2.workset?.interval_s ?? 15) * 1000
   });
   worksetScanner?.start();
   if (config2.wake.backend === "mcp") {
-    return runPullOnly(config2, client, stateDir, socketPath, ipcHandle, worksetScanner);
+    return runPullOnly(config2, client2, stateDir, socketPath, ipcHandle, worksetScanner);
   }
-  return runInjecting(config2, client, stateDir, socketPath, ipcHandle, worksetScanner, cache);
+  return runInjecting(config2, client2, stateDir, socketPath, ipcHandle, worksetScanner, cache);
 }
-async function runPullOnly(config2, client, stateDir, socketPath, ipcHandle, worksetScanner) {
+async function runPullOnly(config2, client2, stateDir, socketPath, ipcHandle, worksetScanner) {
   const noopInjector = {
     probe: async () => "idle",
     inject: async () => {}
   };
-  const heartbeater = new Heartbeater(client, noopInjector, config2.identity.id, config2.heartbeat.interval_s * 1000, (err2) => {
+  const heartbeater = new Heartbeater(client2, noopInjector, config2.identity.id, config2.heartbeat.interval_s * 1000, (err2) => {
     console.error("[meshl] heartbeat error:", err2);
   }, (err2) => {
     console.error("[meshl] heartbeat: room gone/unauthorized — stopping monitor:", err2);
   });
   heartbeater.start();
-  const liveness = config2.liveness.publish ? new LivenessMonitor(client, noopInjector, config2.identity.id, livenessOptsFrom(config2, stateDir), (err2) => {
+  const liveness = config2.liveness.publish ? new LivenessMonitor(client2, noopInjector, config2.identity.id, livenessOptsFrom(config2, stateDir), (err2) => {
     console.error("[meshl] liveness error:", err2);
   }, (err2) => {
     console.error("[meshl] liveness: room gone/unauthorized — stopping monitor:", err2);
@@ -31310,14 +31471,14 @@ async function runPullOnly(config2, client, stateDir, socketPath, ipcHandle, wor
   await ipcHandle.close();
   console.log("[meshl] stopped");
 }
-async function runInjecting(config2, client, stateDir, socketPath, ipcHandle, worksetScanner, cache) {
+async function runInjecting(config2, client2, stateDir, socketPath, ipcHandle, worksetScanner, cache) {
   const rawInjector = buildInjector(config2);
-  const injector = config2.wake.tmux ? new HookStateInjector(rawInjector, config2.wake.tmux.pane, join7(stateDir, AGENT_STATE_FILE), (config2.wake.hook_busy_stale_s ?? 900) * 1000) : rawInjector;
+  const injector = config2.wake.tmux ? new HookStateInjector(rawInjector, config2.wake.tmux.pane, join8(stateDir, AGENT_STATE_FILE), (config2.wake.hook_busy_stale_s ?? 900) * 1000) : rawInjector;
   if (config2.brief.arrival_pointer && isFirstWakeEver(stateDir)) {
     (async () => {
-      const roles = await resolveMyRoles(client, config2.identity.id);
+      const roles = await resolveMyRoles(client2, config2.identity.id);
       const pointer = buildArrivalPointer(config2.identity.id, roles, config2.room.id);
-      const result = await deliverWake(config2, client, injector, stateDir, pointer, Date.now());
+      const result = await deliverWake(config2, client2, injector, stateDir, pointer, Date.now());
       if (result !== "injected") {
         console.error(`[meshl] arrival pointer not delivered (${result}) — it will not be retried until the next reanchor gap`);
       }
@@ -31335,7 +31496,7 @@ async function runInjecting(config2, client, stateDir, socketPath, ipcHandle, wo
     const escalationSeqs = new Set;
     consumerClient = {
       async* follow(since) {
-        for await (const frame of client.follow(since)) {
+        for await (const frame of client2.follow(since)) {
           if (frame.type === "entry" && escalation) {
             if (isEscalation(frame.entry, escalation, selfId, watches)) {
               escalationSeqs.add(frame.entry.seq);
@@ -31345,7 +31506,7 @@ async function runInjecting(config2, client, stateDir, socketPath, ipcHandle, wo
         }
       },
       async getEntries(opts) {
-        const result = await client.getEntries(opts);
+        const result = await client2.getEntries(opts);
         if (escalation) {
           for (const entry of result.entries) {
             if (isEscalation(entry, escalation, selfId, watches)) {
@@ -31359,7 +31520,7 @@ async function runInjecting(config2, client, stateDir, socketPath, ipcHandle, wo
     onWakeCb = async (digest, throughSeq) => {
       if (!consumeEscalations(escalationSeqs, throughSeq))
         return;
-      const result = await deliverWake(config2, client, injector, stateDir, digest, Date.now());
+      const result = await deliverWake(config2, client2, injector, stateDir, digest, Date.now());
       if (result === "gone") {
         console.error("[meshl] injector gone — hybrid escalation digest dropped");
       } else if (result === "timeout") {
@@ -31367,8 +31528,8 @@ async function runInjecting(config2, client, stateDir, socketPath, ipcHandle, wo
       }
     };
     const pollHintMs = (config2.wake.mcp?.poll_hint_interval_s ?? 900) * 1000;
-    nudgeHandle = startNudgeLoop(() => client.getEntries({ limit: 1 }), pollHintMs, async (line) => {
-      const result = await deliverWake(config2, client, injector, stateDir, line, Date.now());
+    nudgeHandle = startNudgeLoop(() => client2.getEntries({ limit: 1 }), pollHintMs, async (line) => {
+      const result = await deliverWake(config2, client2, injector, stateDir, line, Date.now());
       if (result === "gone") {
         console.error("[meshl] injector gone — hybrid poll-hint dropped");
       } else if (result === "timeout") {
@@ -31376,9 +31537,9 @@ async function runInjecting(config2, client, stateDir, socketPath, ipcHandle, wo
       }
     });
   } else {
-    consumerClient = client;
+    consumerClient = client2;
     onWakeCb = async (digest, _throughSeq) => {
-      const result = await deliverWake(config2, client, injector, stateDir, digest, Date.now());
+      const result = await deliverWake(config2, client2, injector, stateDir, digest, Date.now());
       if (result === "gone") {
         console.error("[meshl] injector gone — wake digest dropped, will retry on next event");
       } else if (result === "timeout") {
@@ -31388,28 +31549,28 @@ async function runInjecting(config2, client, stateDir, socketPath, ipcHandle, wo
   }
   const prefetchConfig = config2.prefetch ?? { enabled: true, max_bytes: 5000000 };
   let canReadForPrefetch = () => false;
-  const accessRefreshHandle = prefetchConfig.enabled ? startAccessRefreshLoop(client, config2.identity.id, (config2.wake.duty_poll_interval_s ?? 60) * 1000, (canRead) => {
+  const accessRefreshHandle = prefetchConfig.enabled ? startAccessRefreshLoop(client2, config2.identity.id, (config2.wake.duty_poll_interval_s ?? 60) * 1000, (canRead) => {
     canReadForPrefetch = canRead;
   }) : null;
   const prefetchDeps = {
     cache,
     config: prefetchConfig,
-    canRead: (path3) => canReadForPrefetch(path3),
-    onError: (path3, err2) => {
-      console.error(`[meshl] prefetch warm failed for "${path3}" (cache-only miss — a real read still hydrates it):`, err2);
+    canRead: (path4) => canReadForPrefetch(path4),
+    onError: (path4, err2) => {
+      console.error(`[meshl] prefetch warm failed for "${path4}" (cache-only miss — a real read still hydrates it):`, err2);
     }
   };
   const consumer = new Consumer(consumerClient, config2, onWakeCb, stateDir, config2.identity.id, {}, (kind, err2, consecutive) => {
     console.error(`[meshl] consume ${kind} error (consecutive=${consecutive}):`, err2);
   }, async () => {
-    await client.postEntry({ performative: "signal", data: { condition: "working" } });
+    await client2.postEntry({ performative: "signal", data: { condition: "working" } });
   }, () => worksetScanner?.getCounts() ?? null, prefetchConfig.enabled ? prefetchDeps : undefined);
   const dutyIntervalS = config2.wake.duty_poll_interval_s ?? 60;
   const dutyHandle = dutyIntervalS > 0 ? startDutyLoop(async () => {
-    const s = await client.getState();
+    const s = await client2.getState();
     return { claims: s.claims, roster: s.roster, bindings: s.bindings, decisions: s.decisions };
-  }, config2.identity.id, config2.subscriptions.roles ?? [], dutyIntervalS * 1000, async (line) => await deliverWake(config2, client, injector, stateDir, line, Date.now()) === "injected", async () => {
-    const leases = await client.listLeases({ mine: true });
+  }, config2.identity.id, config2.subscriptions.roles ?? [], dutyIntervalS * 1000, async (line) => await deliverWake(config2, client2, injector, stateDir, line, Date.now()) === "injected", async () => {
+    const leases = await client2.listLeases({ mine: true });
     return Array.isArray(leases) ? leases : [];
   }, (interest) => consumer.setDerivedInterest(interest), () => worksetScanner?.getCounts() ?? null) : null;
   const onRoomGone = (err2) => {
@@ -31421,11 +31582,11 @@ async function runInjecting(config2, client, stateDir, socketPath, ipcHandle, wo
     dutyHandle?.stop();
     accessRefreshHandle?.stop();
   };
-  const heartbeater = new Heartbeater(client, injector, config2.identity.id, config2.heartbeat.interval_s * 1000, (err2) => {
+  const heartbeater = new Heartbeater(client2, injector, config2.identity.id, config2.heartbeat.interval_s * 1000, (err2) => {
     console.error("[meshl] heartbeat error:", err2);
   }, onRoomGone);
   heartbeater.start();
-  const liveness = config2.liveness.publish ? new LivenessMonitor(client, injector, config2.identity.id, livenessOptsFrom(config2, stateDir), (err2) => {
+  const liveness = config2.liveness.publish ? new LivenessMonitor(client2, injector, config2.identity.id, livenessOptsFrom(config2, stateDir), (err2) => {
     console.error("[meshl] liveness error:", err2);
   }, onRoomGone) : null;
   liveness?.start();
@@ -31446,7 +31607,7 @@ async function runInjecting(config2, client, stateDir, socketPath, ipcHandle, wo
   await heartbeater.stop();
   await ipcHandle.close();
   try {
-    const pidPath = join7(stateDir, "daemon.pid");
+    const pidPath = join8(stateDir, "daemon.pid");
     if (existsSync7(pidPath) && parseInt(readFileSync8(pidPath, "utf8").trim(), 10) === process.pid) {
       rmSync3(pidPath, { force: true });
     }
@@ -31454,13 +31615,13 @@ async function runInjecting(config2, client, stateDir, socketPath, ipcHandle, wo
   console.log("[meshl] stopped");
 }
 async function cmdMcp(stateDir) {
-  const socketPath = join7(stateDir, "daemon.sock");
+  const socketPath = join8(stateDir, "daemon.sock");
   await runMcpStdio(socketPath);
 }
 async function cmdStop(configPath) {
   const config2 = loadConfig(configPath);
   const stateDir = resolveHome(config2.state_dir);
-  const pidPath = join7(stateDir, "daemon.pid");
+  const pidPath = join8(stateDir, "daemon.pid");
   if (!existsSync7(pidPath)) {
     die(`no daemon.pid in ${stateDir} — daemon not running? (start: meshl run --config ${configPath})`);
   }
@@ -31539,9 +31700,9 @@ async function cmdValidate(configPath) {
   if (roomEntry && config2.subscriptions.watches && config2.subscriptions.watches.length > 0) {
     try {
       const { secretBytes } = loadSecretBytes(config2);
-      const client = buildClient(config2, secretBytes, roomEntry.token);
+      const client2 = buildClient(config2, secretBytes, roomEntry.token);
       for (const predicate of config2.subscriptions.watches) {
-        const result = await client.postWatch(predicate);
+        const result = await client2.postWatch(predicate);
         if (!result.ok) {
           fail(`watch "${JSON.stringify(predicate)}" failed: ${result.error}`);
         } else {
@@ -31558,7 +31719,7 @@ async function cmdValidate(configPath) {
 async function cmdStatus(configPath) {
   const config2 = loadConfig(configPath);
   const stateDir = resolveHome(config2.state_dir);
-  const cursorPath = join7(stateDir, "wake_cursor.json");
+  const cursorPath = join8(stateDir, "wake_cursor.json");
   let cursorSeq = "none";
   if (existsSync7(cursorPath)) {
     try {
@@ -31573,8 +31734,8 @@ async function cmdStatus(configPath) {
   if (roomEntry) {
     try {
       const { secretBytes } = loadSecretBytes(config2);
-      const client = buildClient(config2, secretBytes, roomEntry.token);
-      const state = await client.getState();
+      const client2 = buildClient(config2, secretBytes, roomEntry.token);
+      const state = await client2.getState();
       const headSeq = state.head.seq;
       const cursorNum = cursorSeq === "none" ? -1 : Number(cursorSeq);
       queueDepth = String(Math.max(0, headSeq - cursorNum));
@@ -31586,7 +31747,7 @@ async function cmdStatus(configPath) {
   let hookState = "n/a";
   if (config2.wake.backend === "tmux" && config2.wake.tmux) {
     const staleMs = (config2.wake.hook_busy_stale_s ?? 900) * 1000;
-    const stateFile = join7(stateDir, AGENT_STATE_FILE);
+    const stateFile = join8(stateDir, AGENT_STATE_FILE);
     try {
       const raw = readFileSync8(stateFile, "utf8").trim();
       const ageS = Math.round((Date.now() - statSync4(stateFile).mtimeMs) / 1000);
@@ -31626,14 +31787,14 @@ async function cmdPoke(configPath, opts = { brief: false }) {
   }
   const stateDir = resolveHome(config2.state_dir);
   let depth = "?";
-  let client = null;
+  let client2 = null;
   const roomEntry = getRoom(config2.room.id);
   if (roomEntry) {
     try {
       const { secretBytes } = loadSecretBytes(config2);
-      client = buildClient(config2, secretBytes, roomEntry.token);
-      const state = await client.getState();
-      const cursorPath = join7(stateDir, "wake_cursor.json");
+      client2 = buildClient(config2, secretBytes, roomEntry.token);
+      const state = await client2.getState();
+      const cursorPath = join8(stateDir, "wake_cursor.json");
       let cursorNum = -1;
       if (existsSync7(cursorPath)) {
         try {
@@ -31647,7 +31808,7 @@ async function cmdPoke(configPath, opts = { brief: false }) {
   if (await injector.probe() === "gone") {
     die(`pane ${config2.wake.tmux.pane} not found — launch the agent in that pane first.`);
   }
-  const line = opts.brief ? buildArrivalPointer(config2.identity.id, client ? await resolveMyRoles(client, config2.identity.id) : [], config2.room.id) : `[mesh] poke — check the room now: run \`mesh inbox\` (queue_depth=${depth}).`;
+  const line = opts.brief ? buildArrivalPointer(config2.identity.id, client2 ? await resolveMyRoles(client2, config2.identity.id) : [], config2.room.id) : `[mesh] poke — check the room now: run \`mesh inbox\` (queue_depth=${depth}).`;
   await injector.inject(line);
   if (opts.brief) {
     await stampWakeAfterPoke(stateDir, Date.now());
@@ -31682,8 +31843,8 @@ wake.backend (in mesh.yml):  tmux (push into a pane) | mcp (pull-only, no tmux) 
 async function cmdExec(opts) {
   const resolvedWorkspace = resolveHome(opts.workspace);
   const resolvedStateDir = resolveHome(opts.stateDir);
-  const binDir = join7(resolvedStateDir, "shims");
-  const socketPath = join7(resolvedStateDir, "daemon.sock");
+  const binDir = join8(resolvedStateDir, "shims");
+  const socketPath = join8(resolvedStateDir, "daemon.sock");
   mkdirSync4(binDir, { recursive: true, mode: 448 });
   installShims(binDir, socketPath, resolvedWorkspace);
   const childEnv = buildExecEnv({
@@ -31708,7 +31869,7 @@ async function cmdExec(opts) {
   });
 }
 function cmdHooks(stateDir, runtime) {
-  const file = join7(stateDir, AGENT_STATE_FILE);
+  const file = join8(stateDir, AGENT_STATE_FILE);
   if (runtime === "omp") {
     process.stderr.write(`# Oh My Pi (omp) idle/busy hook. Save it, then launch the agent with --hook:
 ` + `#   meshl hooks --runtime omp --state-dir ${stateDir} > ~/mesh-agent/state-hook.ts

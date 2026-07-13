@@ -246,6 +246,17 @@ a new layer — visibility is decoupled from write-coordination, and content is 
   `grep`/`rg` → `GET /search`, `cat`/`head` → hydrate-on-read. Out-of-workspace paths pass through
   to the real binary; unsupported predicates fail loud. `mesh fs hydrate` bulk-pulls a subtree to
   disk for builds (transparent build-on-read needs FUSE — v2).
+- **Engine evolution (accepted 2026-07-12; client-library extraction shipped v1.20.0, the
+  `IFileSystem`/`just-bash` half not yet built).** Client logic (`MeshClient`, the file-plane
+  sync/merge/artifact engine, `WorkspaceCache`, `TreeMirror`) has consolidated into a new L3
+  library package `@mesh/engine`; CLI and daemon both depend on it. Still pending: the shim's
+  per-tool router superseded by the real `just-bash` interpreter (Vercel Labs, pinned) over a
+  `MeshRoomFs` `IFileSystem` backend (tree-mirror metadata + `WorkspaceCache` content + CoW
+  write overlay, OCC flush); MCP code-mode tools (`code` primitive, `bash` sugar); the PATH
+  shims becoming thin adapters over `MeshRoomFs`; and the `file.write_batch` room addition.
+  Room additions already shipped (additive, PROTOCOL §10 discipline, v1.20.0/PROTOCOL v1.8):
+  `system.checkpoint` + archive-to-R2 compaction, storage-pressure bands, multipart artifacts.
+  Design: `mesh/docs/superpowers/specs/2026-07-12-engine-architecture-design.md`.
 
 Normative wire surface: `PROTOCOL.md` (§3 performatives, §11 fs MCP tools). Intent / context /
 acceptance: repo-root `INTENT.md` / `CONTEXT.md` / `EXPECTATIONS.md`. Design specs + plans:

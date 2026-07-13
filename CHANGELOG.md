@@ -3,6 +3,103 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.20.0] — 2026-07-12
+
+### Added
+
+- **Room scalability — entries axis (Intent P, CONTEXT §24).** A room-signed
+  `system.checkpoint` entry (`{head_seq, head_hash, snapshot_hash}`) fires
+  when the owner-configured `archive.threshold_entries` is crossed since the
+  last checkpoint; the covered entries range archives to R2
+  (`${room}/archive/${from}-${to}.jsonl`, verbatim) and prunes from DO SQLite.
+  Archival is tiering, never deletion: `GET /entries`, `WS /stream` backfill,
+  and `GET /verify` transparently read through an archived range, and
+  `/tree`'s `tip_ts` is materialized into `file_tree` at prune time so a
+  file's last-modified time survives its originating entry's archival. A room
+  that never sets `archive.threshold_entries` (the default) behaves
+  byte-for-byte unchanged.
+- **Room scalability — content axis (Intent P, CONTEXT §24).** New
+  `fts_max_file_bytes` room config (default 262144, replacing the previous
+  hardcoded 1 MiB indexing cap) excludes oversized files from full-text search
+  — never silently: excluded paths are tracked in a new `file_fts_skipped`
+  projection and surfaced via `GET /search`'s `skipped_count` and `mesh fs
+  grep`'s stderr note.
+- **Room scalability — storage-pressure signal (Intent P S-P4).** Every 256th
+  append checks the DO's real SQLite `databaseSize` against the shared 1 GiB
+  ceiling; crossing 80/90/95% fires a room-authored `escalate(reason:
+  "storage_pressure", {used_bytes, limit_bytes})`, at most once per band per
+  24h — "announced before it binds," never a 500 at the ceiling.
+- **Room scalability — big-file axis (Intent P).** `PUT /artifacts/:hash`
+  streams through R2 native multipart (10 MiB parts) the moment the ACTUAL
+  streamed byte count crosses one part — never gated on the client-declared
+  `Content-Length`, which is checked only as an early reject against the
+  room's `artifact_max_bytes` cap. This replaces the fixed 25 MiB
+  buffered-in-DO-memory wall with the new owner-configurable
+  `artifact_max_bytes` room default (still 25 MiB out of the box), while
+  bounding DO memory to ~one part regardless of what `Content-Length` claims.
+- **`/tree` `tip_ts`.** Every file-tree row now carries its tip entry's
+  timestamp, derived at read via a join on `tip_seq` — the honest mtime
+  source `@mesh/engine`'s `stat` needs (Intent O).
+- **Quiet, honest log reading.** `mesh log` now defaults to the collaboration
+  lane (file/system/signal chatter excluded server-side) with a dim hint line
+  naming what's hidden; `mesh log --all` restores the full log and now pages
+  past the first 100 entries to the log's true end. `mesh inbox` digests a
+  same-sender run of file changes into one line ("wrote N files under …").
+  `file.*` log lines finally render their target path (+ size for writes),
+  with `[redacted]` for recipients without discover access.
+- **Server-side log filters.** `GET /entries` and `WS /stream` accept
+  `performative=`/`exclude=` CSV filters (exact names or `file.*`/`system.*`
+  prefix wildcards, ≤50 items, applied to replay and live frames alike).
+- **`@mesh/engine`.** The client node now lives in its own package: MeshClient,
+  fs/sync/merge/ignore/artifact/edit-base, identity, a live in-memory
+  `TreeMirror` (seq-gap-safe, seeded once then folded from the WS stream), and
+  `WorkspaceCache` reads that skip the per-read `getTree` round trip when a
+  mirror is present. The daemon imports `@mesh/engine` for all engine
+  operations (the backwards daemon → cli import is gone for engine code).
+- **Steward config verbs.** `mesh fs config archive <n> | fts <bytes> |
+  artifact <bytes>` set the new room limits from the CLI (bounds-checked
+  server-side; effective values published on `GET /state`).
+- **`fs put` safety.** A client-side size preflight fails fast — before any
+  byte is read — naming every file over the room's artifact cap and the two
+  remedies (`.meshignore`, `mesh fs config artifact`). `--prune-ignored`
+  evicts room copies of newly-ignored paths, printing each `pruned:` path and
+  a summary count.
+
+### Fixed
+
+- **`.meshignore` no longer lies.** A locally-present-but-ignored file reports
+  the new `ignored` sync state (glyph `i`, with the honest "room still has
+  it" hint) instead of the misleading `local-deleted`.
+- **Checkpoint trust anchors are reproducible.** `snapshot_hash` covers only
+  log-derived state (claims minus lease timestamps, decisions minus
+  wall-clock authority evaluation, roster) and is computed atomically with
+  the head claim — a verifier replaying to `head_seq` derives the same hash
+  even under concurrent appends and heartbeats.
+- **Archive read-through is bounded and complete.** Archived-history reads
+  cap at a 10k-entry budget with `notifies_truncated` / a WS
+  `backfill_truncated{resume_since}` frame, and the engine client + daemon
+  resume transparently over HTTP paging; archive writes chunk (10k rows / 32
+  MiB per object) so enabling archiving on an old, large room can't exhaust
+  DO memory; `/verify` tolerates crash-retry overlapping archive objects and
+  rejects garbage `from=`/`to=` params.
+- **`mesh fs grep`'s skipped-files note** now prints even when a search
+  returns zero results — exactly when the searcher most needs to know an
+  oversized file was excluded from the index.
+- **Rate-limit docs consolidated** into one `docs/operating.md` section
+  (grammar, defaults, bounds, the 20% claim/accept floor, client retry
+  budget).
+
+### Changed
+
+- **PROTOCOL v1.8** (additive): `system.checkpoint` performative, the new
+  config fields, `/entries`+`/stream` filters and read-through semantics,
+  `/search` `skipped_count`, multipart artifact PUT, `/state` effective
+  defaults. Older rooms reject unknown surfaces with `400`; clients degrade
+  reactively.
+
+See `docs/superpowers/specs/2026-07-12-engine-architecture-design.md` §4.1/§8
+and `CONTEXT.md` §24 for the full design.
+
 ## [1.19.0] — 2026-07-12
 
 ### Security

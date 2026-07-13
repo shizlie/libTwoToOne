@@ -183,6 +183,43 @@ the daemon replays from its wake cursor. The cursor is stored locally in
 the next `meshl run`.
 
 ---
+## Rate limits
+
+Every room enforces a per-participant token-bucket rate limit on `POST /entries`
+(`packages/room/src/rate.ts`).
+
+**Grammar:** `<rate>/min[;burst=<n>]` — e.g. `"30/min;burst=60"`. `burst` defaults to
+`rate` when the `;burst=` segment is absent. Owner-settable on a live room via `mesh fs
+config rate "<spec>"` (POST `/config`); bounded to `1..600` requests/min and `1..1000`
+burst depth — a spec outside those bounds is rejected, guarding against a
+misconfiguration that effectively disables throttling for the room.
+
+**Default:** `30/min;burst=60` (set at room creation; see `mesh create-room`).
+
+**The 20% floor:** `claim`, `accept`, and `reject` — the three performatives that move
+work off or onto the claim table — always have 20% of the bucket's burst depth reserved
+for them, so a room saturated with `inform`/`file.write` traffic can never fully starve
+task-lifecycle transitions.
+
+**Resets on hibernation:** the rate limiter is in-memory only (no persistence) — a DO
+eviction (idle timeout, redeploy) resets every participant's bucket to full. This is by
+design (bucket state surviving a redeploy would be surprising, not useful) but means a
+burst immediately after a redeploy is not throttled by any prior activity.
+
+**Lowering a live room's limit** (`mesh fs config rate "<spec>"`) re-seeds the DO's
+`RateLimiter` and resets every participant's in-flight bucket to the new burst — it does
+not retroactively throttle a burst already in progress; the new limit takes full effect
+starting from the next refill, not mid-burst.
+
+**Client-side retry:** every mesh CLI command that posts an entry retries a `429
+rate_limited` response automatically — 5 s per-wait by default (or the server's
+`retry_after_s`, if given), up to a 300 s cumulative budget per command invocation
+before giving up (`packages/cli/src/main.ts`'s `makeRateRetry`).
+
+**Unthrottled endpoints:** `/create`, `/join`, and `/watches` are not rate-limited
+(roster/watch caps bound the durable damage a flood of either could do).
+
+---
 ## Artifact store (R2)
 
 Deliveries upload a tar.gz of the delivered directory to R2, referenced by `r2:<sha256>`.

@@ -102,18 +102,24 @@ MESH_HOME="$OWNER_HOME" $MESH join "$ROOM_URL/v1/rooms/$ROOM_ID" "$INVITE" >/dev
 echo "Owner harry@hcproduct created room $ROOM_ID"
 MESH_HOME="$OWNER_HOME" $MESH fs config write open >/dev/null  # S-K5/S-K6: new-room genesis is write-closed; teammates write below
 
-# ── seed the SHARED WORKSPACE with the buggy todo-backend ──────────────────────────
+# ── the owner's project folder: a real local copy of the buggy backend ─────────────
+# Dropbox semantics (CONTEXT §12.7): every fs verb resolves local bytes against ONE
+# workspace root (default cwd); files hydrate IN PLACE, no shadow dir. So a participant's
+# workspace is just an ordinary folder on disk. We copy the fixture into a demo-owned
+# folder (cleanup is one rm; a real project can live anywhere) and seed the room FROM it,
+# so the owner's `fs status`/`fs ls -f` read in-sync (local == room) — not an empty watcher.
 FIXTURE=""
 for cand in "$ROOT/examples/todo-backend" "$SCRIPT_DIR/todo-backend"; do
   [ -n "$cand" ] && [ -d "$cand" ] && { FIXTURE="$cand"; break; }
 done
 [ -n "$FIXTURE" ] || { echo "todo-backend fixture not found"; exit 1; }
-echo "Seeding shared workspace from $FIXTURE ..."
-( cd "$FIXTURE" && for f in src/todos.ts src/server.ts test/todos.test.ts package.json README.md; do
-    [ -f "$f" ] && MESH_HOME="$OWNER_HOME" $MESH fs put "$f" --as "$f" >/dev/null
-  done )
-echo "Shared workspace seeded:"
-MESH_HOME="$OWNER_HOME" $MESH fs ls | sed 's/^/  /'
+OWNER_FS="$LIVE/owner-fs"
+rm -rf "$OWNER_FS"; mkdir -p "$OWNER_FS"
+cp -R "$FIXTURE/." "$OWNER_FS/"
+echo "Owner project folder: $OWNER_FS  (a copy of $FIXTURE — a real project can live anywhere)"
+( cd "$OWNER_FS" && MESH_HOME="$OWNER_HOME" $MESH fs put . >/dev/null )
+echo "Seeded the room from the owner's folder — local vs room:"
+( cd "$OWNER_FS" && MESH_HOME="$OWNER_HOME" $MESH fs status | sed 's/^/  /' )
 
 # ── seed the room charter (Intent I: situated arrival guidance) ────────────────
 CHARTER_DIR="$LIVE/charter"
@@ -348,33 +354,43 @@ cat <<EOF
   mesh shared-workspace demo is up.    Room: $ROOM_ID
   Room URL: $ROOM_URL      Invite: $INVITE      (share both to join from another machine)
 
-  The team shares ONE live workspace — the FILE PLANE, "Dropbox for agents": one
-  live tree everyone reads and writes, seeded with a buggy TODO backend
-  (toggle() never un-completes a todo, so a test fails).
+  THE FILE PLANE — "Dropbox for agents". The room holds the canonical copy of the
+  files; each participant works in its OWN folder and mesh syncs it to/from the room.
+  Files hydrate IN PLACE in a normal folder — no shadow dir.
+    owner (you): $OWNER_FS   ← real local copy, already IN SYNC with the room
+    fixer:       $LIVE/fixer-work        ← its own endpoint (starts empty, hydrates on demand)
+    reviewer:    $LIVE/reviewer-work     ← its own endpoint
 
-  BYTE-ON-DEMAND  (metadata is free; bytes only when you ask)
-    MESH_HOME=$OWNER_HOME $MESH fs ls -f              # LIVE tree: paths, sizes, last editor, leases — NO bytes fetched
-    MESH_HOME=$OWNER_HOME $MESH fs grep "done = true" # server-side content search — still no local copy
-    MESH_HOME=$OWNER_HOME $MESH fs get src/todos.ts   # NOW pull one file's bytes (hydrate on demand)
+  ONE MACHINE == MANY MACHINES. To mesh, a participant is (identity + its own folder).
+  Two agents in two folders on THIS machine are treated exactly like two agents on two
+  machines — Demo 3 is literally the same commands. Separate folders (not one shared
+  folder) on purpose: sharing a folder bypasses the room and loses what it gives you —
+    • byte distribution: each endpoint gets its own copy, hydrated on demand (fs get).
+    • write coordination: merge-on-write (3-way for code), stale-write protection,
+      exclusive leases, prose CRDT, no silent loss. A raw shared folder gives NONE of
+      this — and it matters on one machine too.
 
-  STALE vs TIP  (know where you stand before you write)
-    MESH_HOME=$OWNER_HOME $MESH fs status             # per-file: = in-sync · ↓ behind (room moved on) · ↑ ahead · ⇅ diverged · 🔒 locked
-    MESH_HOME=$OWNER_HOME $MESH fs status --deep      # dry-run the merge on ⇅ diverged files — see the outcome before you put
-    MESH_HOME=$OWNER_HOME $MESH fs diff src/todos.ts  # your copy vs the room tip (read-only)
+  SEE IT — from the owner's folder (cd first; workspace root = your cwd):
+    cd $OWNER_FS
+    MESH_HOME=$OWNER_HOME $MESH fs status         # all '=' in-sync — your copy matches the room
+    MESH_HOME=$OWNER_HOME $MESH fs ls -f          # live tree: sizes, last editor, leases
+    # after the fixer fixes + puts src/todos.ts, the room tip moves past your copy:
+    MESH_HOME=$OWNER_HOME $MESH fs status         # src/todos.ts now '↓ behind' — your copy is stale
+    MESH_HOME=$OWNER_HOME $MESH fs diff src/todos.ts   # your copy vs the room tip (read-only)
+    MESH_HOME=$OWNER_HOME $MESH fs get src/todos.ts    # pull the new bytes → back to '=' in-sync
 
-  CONFLICT RESOLUTION IS BY FILE TYPE  (the room applies the right policy per extension)
-    code  .ts .js .py .go .rs …  →  merge      concurrent edits 3-way auto-merge on 'fs put';
-                                                a real overlap returns <<<<<<< markers, never silently lost
-    prose .md .txt (READMEs)     →  shared      live CRDT via 'fs edit' — everyone's edits merge in real time
-    any path, when you must      →  exclusive   'mesh fs lock <path>' — a serialized lease; others see 🔒 in 'fs status'
+  CONFLICT RESOLUTION IS BY FILE TYPE:
+    code  .ts .js .py …  →  merge      3-way auto-merge on 'fs put'; real overlaps return
+                                        <<<<<<< markers, never silently lost
+    prose .md .txt       →  shared      live CRDT via 'fs edit'
+    any path, on demand  →  exclusive   'mesh fs lock <path>' (serialized lease; 🔒 in status)
 
   KICK IT OFF  (one human sentence — the whole demo)
     $ANNOUNCE_CMD
 
-  Then: fixer wakes on 'announce' → fs grep/get to read → fixes src/todos.ts →
-  'fs put' (3-way merge; reviewer sees it LIVE) → delivers. reviewer wakes on
-  'deliver' → fs get + bun test → accepts. Watch both planes: 'mesh log -f'
-  (TALK) and 'mesh fs ls -f' (SHARE).
+  Then: fixer wakes on 'announce' → fs grep/get to read → fixes src/todos.ts → 'fs put'
+  → delivers. reviewer wakes on 'deliver' → fs get + bun test → accepts. Watch both
+  planes: 'mesh log -f' (TALK) and 'mesh fs ls -f' (SHARE).
 EOF
 if [ -n "$NO_AGENTS" ]; then
   cat <<EOF

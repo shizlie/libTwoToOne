@@ -11478,7 +11478,7 @@ function wantsVersion(argv) {
 }
 function getVersion() {
   if (true)
-    return "1.20.0";
+    return "1.21.0";
   try {
     const here = dirname6(fileURLToPath(import.meta.url));
     return readFileSync7(resolve3(here, "../../../VERSION"), "utf8").trim();
@@ -13472,7 +13472,7 @@ room:
     aliases: create-room → room create · join → room join
 
 messaging:
-  log [-f]                                                  Show room log (-f: follow)
+  log [-f] [--all]                                          Show room log — collab lane by default (file.* / system.* entries hidden; use --all for the full log, or 'fs log' for the file plane). -f: follow
   chat                                                      Live stream + interactive post
   post <body> [--thread <t>]                                Post a request entry
 

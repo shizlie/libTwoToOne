@@ -8,17 +8,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - **Human room-view page (`GET /room/:room/:cred`).** A read-only, browser-facing
-  view over a room's shared file plane: identity header + an expand/collapse file
-  tree (name, size, last-modified, active-lease holder, per-file "no read"
-  marker). The Worker serves a static HTML shell; the page reads `{room, cred}`
-  from the path and calls the new `GET /v1/rooms/:room/view` data endpoint.
+  view over a room's shared file plane: identity header + a file browser with an
+  **expand/collapse tree** and a flat **List** view, **sortable** by name,
+  last-modified, or size (each with a direction toggle). Each row shows size, the
+  last-modified time (hover for the absolute timestamp), an active-lease badge, and
+  a per-file "no read" marker. The Worker serves a static HTML shell; the page reads
+  `{room, cred}` from the path and calls the new `GET /v1/rooms/:room/view` endpoint.
 - **`GET /v1/rooms/:room/view[?pubkey=&prefix=]` — dual-credential view data.** A
   valid `Authorization: Bearer <token>` → **member view**: the caller's full
-  ACL-filtered tree (`content_hash` included). Otherwise `?pubkey=<pubkey>` →
-  **public view**: identity resolved from the roster, and the file tree is listed
-  only when the owner opted in (see `public_share`), at the room's public posture
-  with `content_hash` stripped (structure only — no sha256 leak). Unknown pubkey →
-  404; no credential → 401.
+  ACL-filtered tree — `content_hash` plus full lease detail (`lease_holder`,
+  `lease_expires`, `locked_seq`). Otherwise `?pubkey=<pubkey>` → **public view**:
+  identity resolved from the roster, and the file tree is listed only when the owner
+  opted in (see `public_share`), at the room's public posture with `content_hash`
+  stripped and any lease coarsened to a bare `locked` flag (no holder or window
+  leaked — structure only). Unknown pubkey → 404; no credential → 401.
 - **`public_share` room config (default `false`).** Owner-set via `POST /config`
   (additive; validated in `system.config`). The single switch that lets the
   unauthenticated pubkey view list files — off by default, so `default_access:

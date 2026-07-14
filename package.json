@@ -1,6 +1,6 @@
 {
   "name": "mesh",
-  "version": "1.21.0-412cdc9f",
+  "version": "1.22.0-7d30c413",
   "type": "module",
   "bin": { "mesh": "./mesh.mjs", "meshl": "./meshl.mjs" },
   "files": ["mesh.mjs", "meshl.mjs", "live-demo.sh", "demo-scaffold.sh", "router.md", "frontend.md", "reviewer.md", "backend.md", "fixer.md", "todo-backend"],

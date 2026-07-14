@@ -3,6 +3,27 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.22.0] — 2026-07-14
+
+### Changed
+
+- **Production custom domain: `usemesh.dev`.** The room Worker now deploys to the
+  custom domain `usemesh.dev` (added as a `custom_domain` route in
+  `packages/room/wrangler.jsonc`), serving the homepage at the root and the room
+  API (`/v1/rooms/...`) and room-view (`/room/...`) endpoints on the same origin.
+  The CLI's `DEFAULT_ROOM_URL` and the demo scripts (`live-demo.sh`,
+  `demo-scaffold.sh`) now default `ROOM_URL` to `https://usemesh.dev`. The
+  `mesh-room.opensocialforall.workers.dev` workers.dev subdomain stays available for
+  local testing and staging (`ROOM_URL=...`), and `http://localhost:8787` still boots
+  a local dev room. The homepage `og:url` now points at `https://usemesh.dev/`; the
+  in-page `ROOM_URL` auto-fill already derives from the served origin, so copy blocks
+  resolve to `usemesh.dev` in production.
+
+### Added
+
+- **`robots.txt`.** `site/robots.txt` allows crawling the homepage and disallows the
+  dynamic, token-gated `/v1/`, `/room/`, and `/healthz` endpoints.
+
 ## [1.21.0] — 2026-07-14
 
 ### Added

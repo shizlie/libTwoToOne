@@ -33,8 +33,9 @@ else
   ROOT=""
 fi
 # Default to the hosted room so installed-mode teammates work out of the box. Set
-# ROOM_URL=http://localhost:8787 (source checkout) to boot/use a local dev room.
-ROOM_URL="${ROOM_URL:-https://mesh-room.opensocialforall.workers.dev}"
+# ROOM_URL=http://localhost:8787 (source checkout) to boot/use a local dev room, or point
+# it at the workers.dev staging room for testing.
+ROOM_URL="${ROOM_URL:-https://usemesh.dev}"
 ROOM_ID="${ROOM_ID:-homepage-demo-$(date +%s)}"
 LIVE="${MESH_LIVE_HOME:-$HOME/.mesh-live}"
 SESSION="meshlive"

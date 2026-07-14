@@ -19,7 +19,7 @@
 #   bash scripts/demo-scaffold.sh --fire         # also announce the fix task for you
 #   bash scripts/demo-scaffold.sh --clean        # tear down agents/listeners + wipe demo state
 #
-# Env:  ROOM_URL (default https://mesh-room.opensocialforall.workers.dev)   ROOM_ID (default todo-demo-<ts>)
+# Env:  ROOM_URL (default https://usemesh.dev)   ROOM_ID (default todo-demo-<ts>)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,8 +31,9 @@ else
   ROOT=""
 fi
 # Default to the hosted room so installed-mode teammates work out of the box (no local
-# wrangler needed). Set ROOM_URL=http://localhost:8787 to boot/use a local dev room.
-ROOM_URL="${ROOM_URL:-https://mesh-room.opensocialforall.workers.dev}"
+# wrangler needed). Set ROOM_URL=http://localhost:8787 to boot/use a local dev room, or
+# ROOM_URL=https://mesh-room.opensocialforall.workers.dev to hit the workers.dev staging room.
+ROOM_URL="${ROOM_URL:-https://usemesh.dev}"
 ROOM_ID="${ROOM_ID:-todo-demo-$(date +%s)}"
 LIVE="${MESH_DEMO_HOME:-$HOME/.mesh-demo}"
 SESSION="meshdemo"

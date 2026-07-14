@@ -3906,7 +3906,7 @@ function saveConfig(cfg, home) {
   fs3.mkdirSync(dir, { recursive: true });
   fs3.writeFileSync(path3.join(dir, "config.json"), JSON.stringify(cfg, null, 2));
 }
-var DEFAULT_ROOM_URL = "https://mesh-room.opensocialforall.workers.dev";
+var DEFAULT_ROOM_URL = "https://usemesh.dev";
 function resolveRoomUrl(explicit, home) {
   return explicit ?? process.env["ROOM_URL"] ?? loadConfig(home).defaultRoomUrl ?? DEFAULT_ROOM_URL;
 }
@@ -11478,7 +11478,7 @@ function wantsVersion(argv) {
 }
 function getVersion() {
   if (true)
-    return "1.21.0";
+    return "1.22.0";
   try {
     const here = dirname6(fileURLToPath(import.meta.url));
     return readFileSync7(resolve3(here, "../../../VERSION"), "utf8").trim();

@@ -39,14 +39,14 @@ ROOM_URL="${ROOM_URL:-https://usemesh.dev}"
 ROOM_ID="${ROOM_ID:-homepage-demo-$(date +%s)}"
 LIVE="${MESH_LIVE_HOME:-$HOME/.mesh-live}"
 SESSION="meshlive"
-# Prefer mesh/meshl on PATH (installed via `bun add -g github:shizlie/libTwoToOne`);
+# Prefer mesh/meshl on PATH (installed via `bun add -g github:shizlie/lib-mesh-room`);
 # fall back to the repo source when running from a checkout.
 if command -v mesh >/dev/null 2>&1 && command -v meshl >/dev/null 2>&1; then
   MESH="$(command -v mesh)"; MESHL="$(command -v meshl)"
 elif [ -n "$ROOT" ]; then
   MESH="bun $ROOT/packages/cli/src/main.ts"; MESHL="bun $ROOT/packages/daemon/src/main.ts"
 else
-  echo "mesh/meshl not found. Install them first:  bun add -g github:shizlie/libTwoToOne" >&2
+  echo "mesh/meshl not found. Install them first:  bun add -g github:shizlie/lib-mesh-room" >&2
   exit 1
 fi
 CLAUDE_BIN="$(command -v claude || true)"

@@ -258,8 +258,9 @@ EOF
   echo "Teammate $id ready (skill=$skill, wakes on '$perf')"
 }
 
+# Wake panes match the FINAL tmux layout below: 0.0 fixer agent · 0.2 reviewer agent.
 setup_teammate fixer@build     fix    fixer.md     announce  "$SESSION:0.0"
-setup_teammate reviewer@build  review reviewer.md  deliver   "$SESSION:0.1"
+setup_teammate reviewer@build  review reviewer.md  deliver   "$SESSION:0.2"
 
 # ── --simulate: CLI-drive the entire fix (no Claude), then assert it landed ─────────
 simulate() {
@@ -321,20 +322,25 @@ if [ -z "$NO_AGENTS" ]; then
   [[ -n "$CLAUDE_BIN" ]] || { echo "claude not found on PATH — re-run with --no-agents to scaffold without live agents"; exit 1; }
   command -v tmux >/dev/null || { echo "tmux not found — re-run with --no-agents"; exit 1; }
   tmux kill-session -t "$SESSION" 2>/dev/null || true
-  tmux new-session  -d -s "$SESSION" -x 200 -y 50
+  tmux new-session  -d -s "$SESSION" -x 220 -y 55
   tmux split-window -t "$SESSION:0.0" -v
   tmux split-window -t "$SESSION:0.1" -v
   tmux select-layout -t "$SESSION:0" even-vertical
-  tmux send-keys -t "$SESSION:0.2" "MESH_HOME='$OWNER_HOME' $MESH log -f --room $ROOM_ID" Enter
-  # Share plane, live: workspace tree + leases + hydration beside the talk feed —
-  # watch the fixer's put land in the metadata tree in real time.
+  # One row per agent: the agent pane (left) beside a live file pane for ITS OWN
+  # folder (right) — the three folders are stand-ins for three machines, so each row
+  # shows one "machine" hydrating independently. Bottom row = the talk feed.
+  # After these -h splits the (positional) indices are:
+  #   0.0 fixer agent · 0.1 fixer files · 0.2 reviewer agent · 0.3 reviewer files · 0.4 talk
+  tmux split-window -t "$SESSION:0.0" -h
   tmux split-window -t "$SESSION:0.2" -h
-  tmux send-keys -t "$SESSION:0.3" "MESH_HOME='$OWNER_HOME' $MESH fs ls -f --room $ROOM_ID --into '$LIVE/owner-fs'" Enter
+  tmux send-keys -t "$SESSION:0.1" "MESH_HOME='$LIVE/fixer' $MESH fs ls -f --room $ROOM_ID --into '$LIVE/fixer-work'" Enter
+  tmux send-keys -t "$SESSION:0.3" "MESH_HOME='$LIVE/reviewer' $MESH fs ls -f --room $ROOM_ID --into '$LIVE/reviewer-work'" Enter
+  tmux send-keys -t "$SESSION:0.4" "MESH_HOME='$OWNER_HOME' $MESH log -f --room $ROOM_ID" Enter
   tmux send-keys -t "$SESSION:0.0" "bash $LIVE/launch-fixer.sh" Enter
-  tmux send-keys -t "$SESSION:0.1" "bash $LIVE/launch-reviewer.sh" Enter
+  tmux send-keys -t "$SESSION:0.2" "bash $LIVE/launch-reviewer.sh" Enter
   echo "Launching agents (waiting for TUIs + trust prompt) ..."
   sleep 13
-  tmux send-keys -t "$SESSION:0.0" Enter; tmux send-keys -t "$SESSION:0.1" Enter
+  tmux send-keys -t "$SESSION:0.0" Enter; tmux send-keys -t "$SESSION:0.2" Enter
   sleep 8
   for name in fixer reviewer; do
     MESH_HOME="$LIVE/$name" $MESH inbox --mark >/dev/null 2>&1 || true
@@ -343,7 +349,7 @@ if [ -z "$NO_AGENTS" ]; then
   done
   sleep 3
   echo "Daemons running (logs: /tmp/mesh-{fixer,reviewer}-daemon.log)"
-  echo "  Watch the agents:  tmux attach -t $SESSION   (pane 2 = talk feed, pane 3 = live workspace)"
+  echo "  Watch:  tmux attach -t $SESSION   (row 1 = fixer + its files, row 2 = reviewer + its files, row 3 = talk feed)"
 fi
 
 # ── onboarding card ─────────────────────────────────────────────────────────────

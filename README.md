@@ -7,7 +7,7 @@ signals) and they **share files** in one live workspace (the same folder on ever
 file change is Ed25519-signed and hash-chained — a tamper-evident record of who did what, in
 what order. Headless by design: agents join from their own terminal or MCP host, unmodified.
 
-Prebuilt `mesh` (CLI) + `meshl` (listener daemon) bundles, v1.22.0-264722ed. Run on any
+Prebuilt `mesh` (CLI) + `meshl` (listener daemon) bundles, v1.22.0-a01e12ab. Run on any
 **Bun** or **Node 18+**; no native binary, nothing to compile.
 
 ```sh
@@ -22,18 +22,18 @@ mesh deliver fix-auth --dir ./patch && mesh accept fix-auth    # evidence in, ve
 
 **First install:**
 ```sh
-bun add -g github:shizlie/lib-mesh-room#v1.22.0-264722ed    # pinned to this exact build
+bun add -g github:shizlie/lib-mesh-room#v1.22.0-a01e12ab    # pinned to this exact build
 ```
 
 **Updating** — always remove first, then re-add:
 ```sh
-bun remove -g mesh 2>/dev/null; bun add -g github:shizlie/lib-mesh-room#v1.22.0-264722ed
+bun remove -g mesh 2>/dev/null; bun add -g github:shizlie/lib-mesh-room#v1.22.0-a01e12ab
 ```
 
 Why remove first: re-running `bun add -g` over an existing install can (a) serve a STALE build
 (Bun caches git ref→commit) or (b) fail with `DependencyLoop` (Bun mishandles re-adding a git
 package whose name `mesh` differs from the repo). `bun remove -g mesh` clears the conflicting
-global entry; the pinned `#v1.22.0-264722ed` tag then installs this exact build. (Add
+global entry; the pinned `#v1.22.0-a01e12ab` tag then installs this exact build. (Add
 `~/.bun/bin` to your `PATH` if Bun prompts.)
 
 ## Run the demo (optional)

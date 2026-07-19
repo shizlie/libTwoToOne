@@ -10148,8 +10148,8 @@ var require_utils = __commonJS((exports, module) => {
     }
     return ind;
   }
-  function removeDotSegments(path6) {
-    let input = path6;
+  function removeDotSegments(path7) {
+    let input = path7;
     const output = [];
     let nextSlash = -1;
     let len = 0;
@@ -10392,8 +10392,8 @@ var require_schemes = __commonJS((exports, module) => {
       wsComponent.secure = undefined;
     }
     if (wsComponent.resourceName) {
-      const [path6, query] = wsComponent.resourceName.split("?");
-      wsComponent.path = path6 && path6 !== "/" ? path6 : undefined;
+      const [path7, query] = wsComponent.resourceName.split("?");
+      wsComponent.path = path7 && path7 !== "/" ? path7 : undefined;
       wsComponent.query = query;
       wsComponent.resourceName = undefined;
     }
@@ -13568,12 +13568,12 @@ var require_dist = __commonJS((exports, module) => {
       throw new Error(`Unknown format "${name}"`);
     return f;
   };
-  function addFormats(ajv, list, fs6, exportName) {
+  function addFormats(ajv, list, fs7, exportName) {
     var _a2;
     var _b;
     (_a2 = (_b = ajv.opts.code).formats) !== null && _a2 !== undefined || (_b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`);
     for (const f of list)
-      ajv.addFormat(f, fs6[f]);
+      ajv.addFormat(f, fs7[f]);
   }
   module.exports = exports = formatsPlugin;
   Object.defineProperty(exports, "__esModule", { value: true });
@@ -13582,8 +13582,8 @@ var require_dist = __commonJS((exports, module) => {
 
 // src/main.ts
 import { readFileSync as readFileSync12, existsSync as existsSync9, statSync as statSync4 } from "node:fs";
-import { mkdirSync as mkdirSync6, openSync, writeFileSync as writeFileSync8, rmSync as rmSync6, realpathSync as realpathSync2 } from "node:fs";
-import { join as join12 } from "node:path";
+import { mkdirSync as mkdirSync4, openSync, writeFileSync as writeFileSync6, rmSync as rmSync6, realpathSync as realpathSync2 } from "node:fs";
+import { join as join13 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 import { spawn } from "node:child_process";
 
@@ -15944,8 +15944,8 @@ function checkLivenessCadence(cfg) {
 }
 
 // src/reanchor.ts
-import { existsSync as existsSync5, readFileSync as readFileSync7, writeFileSync as writeFileSync5 } from "node:fs";
-import { join as join7 } from "node:path";
+import { existsSync as existsSync5, readFileSync as readFileSync7, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join8 } from "node:path";
 
 // src/injectors/tmux.ts
 import { execFile } from "node:child_process";
@@ -16539,8 +16539,37 @@ function hashFromRef(content_hash) {
   return m[1];
 }
 // ../engine/src/edit-base.ts
+import * as fs2 from "node:fs";
+import * as path3 from "node:path";
+
+// ../engine/src/private-file.ts
 import * as fs from "node:fs";
 import * as path2 from "node:path";
+import { randomBytes as randomBytes2 } from "node:crypto";
+function writePrivateFileAtomic(finalPath, content) {
+  const dir = path2.dirname(finalPath);
+  fs.mkdirSync(dir, { recursive: true, mode: 448 });
+  const tmpPath = path2.join(dir, `.${path2.basename(finalPath)}.tmp-${process.pid}-${randomBytes2(6).toString("hex")}`);
+  try {
+    fs.writeFileSync(tmpPath, content, { encoding: "utf8", mode: 384 });
+    fs.renameSync(tmpPath, finalPath);
+  } catch (error) {
+    try {
+      fs.rmSync(tmpPath, { force: true });
+    } catch {}
+    throw error;
+  }
+  if (process.platform !== "win32") {
+    try {
+      fs.chmodSync(finalPath, 384);
+    } catch {}
+    try {
+      fs.chmodSync(dir, 448);
+    } catch {}
+  }
+}
+
+// ../engine/src/edit-base.ts
 function sidecarPath(roomId, repopath, home) {
   for (const [label, raw] of [["roomId", roomId], ["repopath", repopath]]) {
     let decoded;
@@ -16553,25 +16582,25 @@ function sidecarPath(roomId, repopath, home) {
       throw new Error(`sidecarPath: illegal ${label} "${raw}"`);
     }
   }
-  return path2.join(home ?? meshHome(), "edit-base", roomId, encodeURIComponent(repopath));
+  return path3.join(home ?? meshHome(), "edit-base", roomId, encodeURIComponent(repopath));
 }
 function readSidecar(roomId, repopath, home) {
   const p = sidecarPath(roomId, repopath, home);
-  if (!fs.existsSync(p))
+  if (!fs2.existsSync(p))
     return;
   try {
-    fs.chmodSync(p, 384);
+    fs2.chmodSync(p, 384);
   } catch {}
   try {
-    return JSON.parse(fs.readFileSync(p, "utf8"));
+    return JSON.parse(fs2.readFileSync(p, "utf8"));
   } catch {
     return;
   }
 }
 
 // ../engine/src/folder-lineage.ts
-import * as fs2 from "node:fs";
-import * as path3 from "node:path";
+import * as fs3 from "node:fs";
+import * as path4 from "node:path";
 var FOLDER_STATE_DIR = ".mesh";
 function assertNoTraversal(label, raw) {
   let decoded;
@@ -16587,14 +16616,14 @@ function assertNoTraversal(label, raw) {
 function folderSidecarPath(root, roomKey, repopath) {
   assertNoTraversal("roomKey", roomKey);
   assertNoTraversal("repopath", repopath);
-  return path3.join(root, FOLDER_STATE_DIR, "lineage", roomKey, encodeURIComponent(repopath));
+  return path4.join(root, FOLDER_STATE_DIR, "lineage", roomKey, encodeURIComponent(repopath));
 }
 function readFolderSidecar(root, roomKey, repopath) {
   const p = folderSidecarPath(root, roomKey, repopath);
-  if (!fs2.existsSync(p))
+  if (!fs3.existsSync(p))
     return;
   try {
-    return JSON.parse(fs2.readFileSync(p, "utf8"));
+    return JSON.parse(fs3.readFileSync(p, "utf8"));
   } catch {
     return;
   }
@@ -16665,29 +16694,29 @@ class WorkspaceCache {
     this._idleTtlMs = opts?.idleTtlMs ?? DEFAULT_IDLE_TTL_MS;
     this._mirror = opts?.mirror;
   }
-  async read(path4) {
+  async read(path5) {
     let treeHash;
     if (this._mirror !== undefined) {
-      const node = this._mirror.get(path4);
+      const node = this._mirror.get(path5);
       if (node === undefined) {
-        throw new Error(`WorkspaceCache.read: path "${path4}" not found in room tree`);
+        throw new Error(`WorkspaceCache.read: path "${path5}" not found in room tree`);
       }
       treeHash = node.content_hash;
     } else {
-      const treeResult = await this._client.getTree(path4);
+      const treeResult = await this._client.getTree(path5);
       if (!("tree" in treeResult)) {
-        throw new Error(`WorkspaceCache.read: getTree failed for path "${path4}": ${treeResult.error}`);
+        throw new Error(`WorkspaceCache.read: getTree failed for path "${path5}": ${treeResult.error}`);
       }
-      const node = resolveNode(treeResult.tree, path4);
+      const node = resolveNode(treeResult.tree, path5);
       if (node === undefined) {
-        throw new Error(`WorkspaceCache.read: path "${path4}" not found in room tree`);
+        throw new Error(`WorkspaceCache.read: path "${path5}" not found in room tree`);
       }
       treeHash = node.content_hash;
     }
     if (treeHash === undefined) {
-      throw new Error(`WorkspaceCache.read: path "${path4}" is content-gated (no read grant) — cannot hydrate`);
+      throw new Error(`WorkspaceCache.read: path "${path5}" is content-gated (no read grant) — cannot hydrate`);
     }
-    const existing = this._entries.get(path4);
+    const existing = this._entries.get(path5);
     if (isCacheFresh(existing?.hash, treeHash)) {
       existing.atime = Date.now();
       return existing.bytes;
@@ -16695,36 +16724,36 @@ class WorkspaceCache {
     const rawHash = hashFromRef(treeHash);
     const blobResult = await this._client.getArtifact(rawHash);
     if (!(blobResult instanceof Uint8Array)) {
-      throw new Error(`WorkspaceCache.read: getArtifact failed for "${path4}" (hash ${rawHash}): ${blobResult.error}`);
+      throw new Error(`WorkspaceCache.read: getArtifact failed for "${path5}" (hash ${rawHash}): ${blobResult.error}`);
     }
     if (existing !== undefined) {
       this._totalBytes -= existing.bytes.byteLength;
-      this._entries.delete(path4);
+      this._entries.delete(path5);
     }
     const entry = { hash: treeHash, bytes: blobResult, atime: Date.now() };
-    this._entries.set(path4, entry);
+    this._entries.set(path5, entry);
     this._totalBytes += blobResult.byteLength;
     this._evict();
     return blobResult;
   }
-  isWarm(path4, hash) {
-    return this._entries.get(path4)?.hash === hash;
+  isWarm(path5, hash) {
+    return this._entries.get(path5)?.hash === hash;
   }
-  async warm(path4, hash) {
-    if (this.isWarm(path4, hash))
+  async warm(path5, hash) {
+    if (this.isWarm(path5, hash))
       return;
     const rawHash = hashFromRef(hash);
     const blobResult = await this._client.getArtifact(rawHash);
     if (!(blobResult instanceof Uint8Array)) {
-      throw new Error(`WorkspaceCache.warm: getArtifact failed for "${path4}" (hash ${rawHash}): ${blobResult.error}`);
+      throw new Error(`WorkspaceCache.warm: getArtifact failed for "${path5}" (hash ${rawHash}): ${blobResult.error}`);
     }
-    const existing = this._entries.get(path4);
+    const existing = this._entries.get(path5);
     if (existing !== undefined) {
       this._totalBytes -= existing.bytes.byteLength;
-      this._entries.delete(path4);
+      this._entries.delete(path5);
     }
     const entry = { hash, bytes: blobResult, atime: Date.now() };
-    this._entries.set(path4, entry);
+    this._entries.set(path5, entry);
     this._totalBytes += blobResult.byteLength;
     this._evict();
   }
@@ -16749,10 +16778,10 @@ class WorkspaceCache {
   }
   _evict() {
     const now = Date.now();
-    for (const [path4, entry] of this._entries) {
+    for (const [path5, entry] of this._entries) {
       if (now - entry.atime > this._idleTtlMs) {
         this._totalBytes -= entry.bytes.byteLength;
-        this._entries.delete(path4);
+        this._entries.delete(path5);
       }
     }
     while (this._totalBytes > this._maxBytes && this._entries.size > 0) {
@@ -16822,19 +16851,19 @@ class TreeMirror {
     this._headSeq = entry.seq;
     return true;
   }
-  get(path4) {
-    return this._nodes.get(normalizeId(path4));
+  get(path5) {
+    return this._nodes.get(normalizeId(path5));
   }
   getAllPaths() {
     return [...this._nodes.keys()];
   }
 }
 // ../engine/src/machine-registry.ts
-import * as fs3 from "node:fs";
-import * as path4 from "node:path";
+import * as fs4 from "node:fs";
+import * as path5 from "node:path";
 import * as os2 from "node:os";
 function machineDir() {
-  return process.env["MESH_MACHINE_DIR"] ?? path4.join(os2.homedir(), ".mesh", "machine");
+  return process.env["MESH_MACHINE_DIR"] ?? path5.join(os2.homedir(), ".mesh", "machine");
 }
 function roomKeyFor(origin, roomId) {
   return encodeURIComponent(origin) + "#" + encodeURIComponent(roomId);
@@ -16857,14 +16886,14 @@ function normalizeOrigin(url) {
   }
 }
 function registryPath(dir) {
-  return path4.join(dir ?? machineDir(), "registry.json");
+  return path5.join(dir ?? machineDir(), "registry.json");
 }
 function loadMachineRegistry(dir) {
   const p = registryPath(dir);
-  if (!fs3.existsSync(p))
+  if (!fs4.existsSync(p))
     return { v: 1, homes: [], daemons: {} };
   try {
-    const raw = JSON.parse(fs3.readFileSync(p, "utf8"));
+    const raw = JSON.parse(fs4.readFileSync(p, "utf8"));
     return {
       v: 1,
       homes: Array.isArray(raw.homes) ? raw.homes : [],
@@ -16875,26 +16904,8 @@ function loadMachineRegistry(dir) {
   }
 }
 function writeRegistry(dir, registry) {
-  const targetDir = dir ?? machineDir();
-  fs3.mkdirSync(targetDir, { recursive: true, mode: 448 });
-  const finalPath = registryPath(dir);
-  const tmpPath = path4.join(targetDir, `.registry.json.tmp-${process.pid}-${Date.now()}`);
-  try {
-    fs3.writeFileSync(tmpPath, JSON.stringify(registry, null, 2) + `
-`, { encoding: "utf8", mode: 384 });
-    fs3.renameSync(tmpPath, finalPath);
-  } catch (err2) {
-    try {
-      fs3.rmSync(tmpPath, { force: true });
-    } catch {}
-    throw err2;
-  }
-  try {
-    fs3.chmodSync(finalPath, 384);
-  } catch {}
-  try {
-    fs3.chmodSync(targetDir, 448);
-  } catch {}
+  writePrivateFileAtomic(registryPath(dir), JSON.stringify(registry, null, 2) + `
+`);
 }
 function daemonKey(home, roomKey) {
   return `${home}#${roomKey}`;
@@ -16939,19 +16950,19 @@ function parseRoomsFile(raw) {
   return { file: { v: 2, memberships }, wasV1: true };
 }
 // ../cli/src/config.ts
-import * as fs5 from "node:fs";
-import * as path5 from "node:path";
+import * as fs6 from "node:fs";
+import * as path6 from "node:path";
 function roomsPath(home) {
-  return path5.join(home ?? meshHome(), "rooms.json");
+  return path6.join(home ?? meshHome(), "rooms.json");
 }
 function loadRooms(home) {
   const p = roomsPath(home);
-  if (!fs5.existsSync(p))
+  if (!fs6.existsSync(p))
     return { v: 2, memberships: {} };
   try {
-    fs5.chmodSync(p, 384);
+    fs6.chmodSync(p, 384);
   } catch {}
-  const raw = JSON.parse(fs5.readFileSync(p, "utf8"));
+  const raw = JSON.parse(fs6.readFileSync(p, "utf8"));
   const { file, wasV1 } = parseRoomsFile(raw);
   if (!wasV1)
     return file;
@@ -16965,20 +16976,9 @@ function loadRooms(home) {
   return file;
 }
 function saveRooms(rooms, home) {
-  const dir = home ?? meshHome();
-  fs5.mkdirSync(dir, { recursive: true, mode: 448 });
   const finalPath = roomsPath(home);
-  const tmpPath = path5.join(dir, `.rooms.json.tmp-${process.pid}-${Date.now()}`);
-  try {
-    fs5.writeFileSync(tmpPath, JSON.stringify(rooms, null, 2) + `
-`, { encoding: "utf8", mode: 384 });
-    fs5.renameSync(tmpPath, finalPath);
-  } catch (err2) {
-    try {
-      fs5.rmSync(tmpPath, { force: true });
-    } catch {}
-    throw err2;
-  }
+  writePrivateFileAtomic(finalPath, JSON.stringify(rooms, null, 2) + `
+`);
 }
 function findRoomKeysById(rooms, roomId) {
   const out = [];
@@ -16993,14 +16993,14 @@ function isRoomIdAmbiguous(roomId, home) {
   return findRoomKeysById(loadRooms(home), roomId).length > 1;
 }
 function activeRoomPath(home) {
-  return path5.join(home ?? meshHome(), "active_room");
+  return path6.join(home ?? meshHome(), "active_room");
 }
 function readActiveRoomRaw(home) {
   const p = activeRoomPath(home);
-  if (!fs5.existsSync(p))
+  if (!fs6.existsSync(p))
     return null;
   try {
-    return fs5.readFileSync(p, "utf8").trim() || null;
+    return fs6.readFileSync(p, "utf8").trim() || null;
   } catch {
     return null;
   }
@@ -17009,13 +17009,13 @@ function setActiveRoom(roomKey, home) {
   const p = activeRoomPath(home);
   if (roomKey === null) {
     try {
-      fs5.rmSync(p, { force: true });
+      fs6.rmSync(p, { force: true });
     } catch {}
     return;
   }
   const dir = home ?? meshHome();
-  fs5.mkdirSync(dir, { recursive: true, mode: 448 });
-  fs5.writeFileSync(p, roomKey + `
+  fs6.mkdirSync(dir, { recursive: true, mode: 448 });
+  fs6.writeFileSync(p, roomKey + `
 `, { encoding: "utf8", mode: 384 });
 }
 
@@ -17099,18 +17099,18 @@ function buildBriefInput(state, selfId, roles, roomId, room, roleCharters, works
 // src/reanchor.ts
 var LAST_WAKE_FILE = "last_wake.json";
 function isFirstWakeEver(stateDir) {
-  return !existsSync5(join7(stateDir, "wake_cursor.json")) && !existsSync5(join7(stateDir, LAST_WAKE_FILE));
+  return !existsSync5(join8(stateDir, "wake_cursor.json")) && !existsSync5(join8(stateDir, LAST_WAKE_FILE));
 }
 function loadLastWakeTs(stateDir) {
   try {
-    const raw = readFileSync7(join7(stateDir, LAST_WAKE_FILE), "utf8");
+    const raw = readFileSync7(join8(stateDir, LAST_WAKE_FILE), "utf8");
     return JSON.parse(raw).ts;
   } catch {
     return null;
   }
 }
 function stampWakeDelivered(stateDir, ts) {
-  writeFileSync5(join7(stateDir, LAST_WAKE_FILE), JSON.stringify({ ts }));
+  writeFileSync3(join8(stateDir, LAST_WAKE_FILE), JSON.stringify({ ts }));
 }
 function shouldReanchor(brief, lastWakeTs, now) {
   if (!brief.arrival_pointer || brief.reanchor_after_s <= 0)
@@ -17226,12 +17226,12 @@ class HookStateInjector {
 
 // src/ipc.ts
 import { createServer } from "node:net";
-import { existsSync as existsSync7, unlinkSync, statSync as statSync2, chmodSync as chmodSync6 } from "node:fs";
+import { existsSync as existsSync7, unlinkSync, statSync as statSync2, chmodSync as chmodSync5 } from "node:fs";
 import { basename as pathBasename } from "node:path";
 
 // src/fs-shim.ts
 import * as nodePath from "node:path";
-import { writeFileSync as writeFileSync6, chmodSync as chmodSync5, existsSync as existsSync6, realpathSync } from "node:fs";
+import { writeFileSync as writeFileSync4, chmodSync as chmodSync4, existsSync as existsSync6, realpathSync } from "node:fs";
 var FIND_FAIL_LOUD = new Set([
   "-exec",
   "-execdir",
@@ -17570,8 +17570,8 @@ function installShims(binDir, socketPath, workspace) {
   for (const tool of ["ls", "grep", "cat", "find"]) {
     const script = makeShimScript(tool, socketPath, workspace);
     const dest = nodePath.join(binDir, tool);
-    writeFileSync6(dest, script, { encoding: "utf8", mode: 493 });
-    chmodSync5(dest, 493);
+    writeFileSync4(dest, script, { encoding: "utf8", mode: 493 });
+    chmodSync4(dest, 493);
   }
 }
 
@@ -17614,7 +17614,7 @@ function startIpcServer(opts) {
       reject(new Error(`[ipc] ${reason}`));
     }
     try {
-      chmodSync6(socketPath, 384);
+      chmodSync5(socketPath, 384);
     } catch (err2) {
       abortServer(`chmod 0600 failed: ${String(err2)}`);
       return;
@@ -17709,19 +17709,19 @@ function startIpcServer(opts) {
       const roles = roleFilter !== undefined ? [roleFilter] : myRoles(bindings, selfId ?? "");
       const tree = await cache.ls("charter/");
       const byPath = new Map(tree.map((n) => [normalizeId(n.path), n]));
-      const readSection = async (path6) => {
-        const node = byPath.get(normalizeId(path6));
+      const readSection = async (path7) => {
+        const node = byPath.get(normalizeId(path7));
         if (!node)
-          return { path: path6, content: null, tip_seq: null, author: null };
+          return { path: path7, content: null, tip_seq: null, author: null };
         let content;
         try {
-          content = Buffer.from(await cache.read(path6)).toString("utf8");
+          content = Buffer.from(await cache.read(path7)).toString("utf8");
         } catch (err2) {
-          console.error(`[meshl] room_brief: charter read failed for ${path6}; degrading to no-charter:`, err2);
-          return { path: path6, content: null, tip_seq: null, author: null };
+          console.error(`[meshl] room_brief: charter read failed for ${path7}; degrading to no-charter:`, err2);
+          return { path: path7, content: null, tip_seq: null, author: null };
         }
         const author = await authorOf(client2, node.tip_seq);
-        return { path: path6, content, tip_seq: node.tip_seq, author };
+        return { path: path7, content, tip_seq: node.tip_seq, author };
       };
       const room = await readSection(CHARTER_ROOM_PATH);
       const roleCharters = await Promise.all(roles.map((role) => readSection(charterRolePath(role))));
@@ -18315,8 +18315,8 @@ function getErrorMap() {
 }
 // ../../node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path6, errorMaps, issueData } = params;
-  const fullPath = [...path6, ...issueData.path || []];
+  const { data, path: path7, errorMaps, issueData } = params;
+  const fullPath = [...path7, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -18428,11 +18428,11 @@ var errorUtil;
 
 // ../../node_modules/zod/v3/types.js
 class ParseInputLazyPath {
-  constructor(parent, value, path6, key) {
+  constructor(parent, value, path7, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path6;
+    this._path = path7;
     this._key = key;
   }
   get path() {
@@ -22006,10 +22006,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path6) {
-  if (!path6)
+function getElementAtPath(obj, path7) {
+  if (!path7)
     return obj;
-  return path6.reduce((acc, key) => acc?.[key], obj);
+  return path7.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -22325,11 +22325,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path6, issues) {
+function prefixIssues(path7, issues) {
   return issues.map((iss) => {
     var _a2;
     (_a2 = iss).path ?? (_a2.path = []);
-    iss.path.unshift(path6);
+    iss.path.unshift(path7);
     return iss;
   });
 }
@@ -31384,7 +31384,7 @@ function startDutyLoop(getState, selfId, configRoles, intervalMs, inject, getLea
 
 // src/workset.ts
 import { existsSync as existsSync8, readFileSync as readFileSync9, statSync as statSync3 } from "node:fs";
-import { join as join9 } from "node:path";
+import { join as join10 } from "node:path";
 var CONFLICT_STATES = { diverged: true, "never-synced": true };
 
 class WorksetScanner {
@@ -31454,8 +31454,8 @@ class WorksetScanner {
     }
   }
   async _tick() {
-    const legacyDir = join9(this.meshHomeDir, "edit-base", this.roomId);
-    const folderDir = join9(this.workspaceRoot, FOLDER_STATE_DIR, "lineage", this.roomKey);
+    const legacyDir = join10(this.meshHomeDir, "edit-base", this.roomId);
+    const folderDir = join10(this.workspaceRoot, FOLDER_STATE_DIR, "lineage", this.roomKey);
     if (!existsSync8(legacyDir) && !existsSync8(folderDir)) {
       if (!this.warnedNoLineage) {
         this.log(`[workset] room "${this.roomId}" has no local sync lineage yet (no folder or legacy edit-base record) — ` + `skipping tree-diff scan until \`mesh fs get/put/edit\` seeds one`);
@@ -31491,7 +31491,7 @@ class WorksetScanner {
     this.onScanCb?.(this.latest);
   }
   localHash(repoPath) {
-    const abs = join9(this.workspaceRoot, repoPath);
+    const abs = join10(this.workspaceRoot, repoPath);
     let st;
     try {
       st = statSync3(abs);
@@ -31515,12 +31515,12 @@ class WorksetScanner {
 }
 
 // src/pending-wake.ts
-import { readFileSync as readFileSync10, writeFileSync as writeFileSync7, renameSync as renameSync5, rmSync as rmSync5 } from "node:fs";
-import { join as join10 } from "node:path";
+import { readFileSync as readFileSync10, writeFileSync as writeFileSync5, renameSync as renameSync2, rmSync as rmSync5 } from "node:fs";
+import { join as join11 } from "node:path";
 var PENDING_WAKE_FILE = "pending_wake.json";
 function loadPendingWake(stateDir) {
   try {
-    const raw = JSON.parse(readFileSync10(join10(stateDir, PENDING_WAKE_FILE), "utf8"));
+    const raw = JSON.parse(readFileSync10(join11(stateDir, PENDING_WAKE_FILE), "utf8"));
     if (typeof raw.digest !== "string" || typeof raw.through_seq !== "number")
       return null;
     return raw;
@@ -31529,15 +31529,15 @@ function loadPendingWake(stateDir) {
   }
 }
 function savePendingWake(stateDir, p) {
-  const target = join10(stateDir, PENDING_WAKE_FILE);
+  const target = join11(stateDir, PENDING_WAKE_FILE);
   const tmp = `${target}.tmp`;
-  writeFileSync7(tmp, JSON.stringify(p));
-  renameSync5(tmp, target);
+  writeFileSync5(tmp, JSON.stringify(p));
+  renameSync2(tmp, target);
 }
 function clearPendingWakeIf(stateDir, throughSeq) {
   const current = loadPendingWake(stateDir);
   if (current !== null && current.through_seq <= throughSeq) {
-    rmSync5(join10(stateDir, PENDING_WAKE_FILE), { force: true });
+    rmSync5(join11(stateDir, PENDING_WAKE_FILE), { force: true });
   }
 }
 function durableDeliver(stateDir, deliver, log = (m) => console.error(m)) {
@@ -31776,7 +31776,7 @@ import { dirname as dirname5, resolve as resolve4 } from "node:path";
 import { fileURLToPath } from "node:url";
 function getVersion() {
   if (true)
-    return "1.28.0";
+    return "1.28.1";
   try {
     const here = dirname5(fileURLToPath(import.meta.url));
     return readFileSync11(resolve4(here, "../../../VERSION"), "utf8").trim();
@@ -31841,10 +31841,10 @@ function usage() {
 }
 
 // src/daemon-registry.ts
-import { join as join11, resolve as resolve5 } from "node:path";
+import { join as join12, resolve as resolve5 } from "node:path";
 import { homedir as homedir3 } from "node:os";
 function resolveHome(p) {
-  return p.startsWith("~/") ? join11(homedir3(), p.slice(2)) : resolve5(p);
+  return p.startsWith("~/") ? join12(homedir3(), p.slice(2)) : resolve5(p);
 }
 function resolveDaemonRoomEntry(config2) {
   const origin = normalizeOrigin(config2.room.url);
@@ -31951,7 +31951,7 @@ function livenessOptsFrom(config2, stateDir) {
     intervalMs: config2.liveness.interval_s * 1000,
     stuckAfterMs: config2.liveness.stuck_after_s * 1000,
     debounceMs: config2.liveness.debounce_s * 1000,
-    hookStateFile: config2.wake.tmux ? join12(stateDir, AGENT_STATE_FILE) : null
+    hookStateFile: config2.wake.tmux ? join13(stateDir, AGENT_STATE_FILE) : null
   };
 }
 async function cmdRun(configPath, opts) {
@@ -31961,9 +31961,9 @@ async function cmdRun(configPath, opts) {
   if (!roomEntry)
     die(`no token for room "${config2.room.id}" — run "mesh join" first`);
   const stateDir = resolveHome(config2.state_dir);
-  mkdirSync6(stateDir, { recursive: true, mode: 448 });
+  mkdirSync4(stateDir, { recursive: true, mode: 448 });
   if (!opts.foreground && process.env["MESHL_DETACHED"] !== "1") {
-    const pidPath = join12(stateDir, "daemon.pid");
+    const pidPath = join13(stateDir, "daemon.pid");
     if (existsSync9(pidPath)) {
       const existing = parseInt(readFileSync12(pidPath, "utf8").trim(), 10);
       if (Number.isInteger(existing) && pidAlive(existing)) {
@@ -31978,14 +31978,14 @@ async function cmdRun(configPath, opts) {
         console.log(`[meshl] replacing running daemon (pid ${existing})`);
       }
     }
-    const logPath = join12(stateDir, "daemon.log");
+    const logPath = join13(stateDir, "daemon.log");
     const out = openSync(logPath, "a");
     const child = spawn(process.execPath, [process.argv[1], "run", "--config", configPath, "--foreground"], {
       detached: true,
       stdio: ["ignore", out, out],
       env: { ...process.env, MESHL_DETACHED: "1" }
     });
-    writeFileSync8(pidPath, `${child.pid}
+    writeFileSync6(pidPath, `${child.pid}
 `, { mode: 384 });
     child.unref();
     console.log(`meshl daemon started — pid ${child.pid}, room ${config2.room.id}`);
@@ -32006,8 +32006,8 @@ async function cmdRun(configPath, opts) {
   const livenessWarn = checkLivenessCadence(config2.liveness);
   if (livenessWarn !== null)
     console.warn(`[meshl] ${livenessWarn}`);
-  const socketPath = join12(stateDir, "daemon.sock");
-  const cache = new WorkspaceCache(join12(stateDir, "fs", config2.room.id), client2);
+  const socketPath = join13(stateDir, "daemon.sock");
+  const cache = new WorkspaceCache(join13(stateDir, "fs", config2.room.id), client2);
   const ipcHandle = await startIpcServer({
     client: client2,
     stateDir,
@@ -32069,7 +32069,7 @@ async function runPullOnly(config2, client2, stateDir, socketPath, ipcHandle, wo
 }
 async function runInjecting(config2, client2, stateDir, socketPath, ipcHandle, worksetScanner, cache, home, roomKey) {
   const rawInjector = buildInjector(config2);
-  const injector = config2.wake.tmux ? new HookStateInjector(rawInjector, config2.wake.tmux.pane, join12(stateDir, AGENT_STATE_FILE), (config2.wake.hook_busy_stale_s ?? 900) * 1000) : rawInjector;
+  const injector = config2.wake.tmux ? new HookStateInjector(rawInjector, config2.wake.tmux.pane, join13(stateDir, AGENT_STATE_FILE), (config2.wake.hook_busy_stale_s ?? 900) * 1000) : rawInjector;
   const deliver = (digest) => deliverWake(config2, client2, injector, stateDir, digest, Date.now());
   if (config2.brief.arrival_pointer && isFirstWakeEver(stateDir)) {
     (async () => {
@@ -32138,9 +32138,9 @@ async function runInjecting(config2, client2, stateDir, socketPath, ipcHandle, w
   const prefetchDeps = {
     cache,
     config: prefetchConfig,
-    canRead: (path6) => canReadForPrefetch(path6),
-    onError: (path6, err2) => {
-      console.error(`[meshl] prefetch warm failed for "${path6}" (cache-only miss — a real read still hydrates it):`, err2);
+    canRead: (path7) => canReadForPrefetch(path7),
+    onError: (path7, err2) => {
+      console.error(`[meshl] prefetch warm failed for "${path7}" (cache-only miss — a real read still hydrates it):`, err2);
     }
   };
   const consumer = new Consumer(consumerClient, config2, onWakeCb, stateDir, config2.identity.id, {}, (kind, err2, consecutive) => {
@@ -32200,7 +32200,7 @@ async function runInjecting(config2, client2, stateDir, socketPath, ipcHandle, w
   await ipcHandle.close();
   removeDaemonRegistrationBestEffort(home, roomKey);
   try {
-    const pidPath = join12(stateDir, "daemon.pid");
+    const pidPath = join13(stateDir, "daemon.pid");
     if (existsSync9(pidPath) && parseInt(readFileSync12(pidPath, "utf8").trim(), 10) === process.pid) {
       rmSync6(pidPath, { force: true });
     }
@@ -32208,13 +32208,13 @@ async function runInjecting(config2, client2, stateDir, socketPath, ipcHandle, w
   console.log("[meshl] stopped");
 }
 async function cmdMcp(stateDir) {
-  const socketPath = join12(stateDir, "daemon.sock");
+  const socketPath = join13(stateDir, "daemon.sock");
   await runMcpStdio(socketPath);
 }
 async function cmdStop(configPath) {
   const config2 = loadConfig(configPath);
   const stateDir = resolveHome(config2.state_dir);
-  const pidPath = join12(stateDir, "daemon.pid");
+  const pidPath = join13(stateDir, "daemon.pid");
   if (!existsSync9(pidPath)) {
     die(`no daemon.pid in ${stateDir} — daemon not running? (start: meshl run --config ${configPath})`);
   }
@@ -32312,7 +32312,7 @@ async function cmdValidate(configPath) {
 async function cmdStatus(configPath) {
   const config2 = loadConfig(configPath);
   const stateDir = resolveHome(config2.state_dir);
-  const cursorPath = join12(stateDir, "wake_cursor.json");
+  const cursorPath = join13(stateDir, "wake_cursor.json");
   let cursorSeq = "none";
   if (existsSync9(cursorPath)) {
     try {
@@ -32342,7 +32342,7 @@ async function cmdStatus(configPath) {
   let hookState = "n/a";
   if (config2.wake.backend === "tmux" && config2.wake.tmux) {
     const staleMs = (config2.wake.hook_busy_stale_s ?? 900) * 1000;
-    const stateFile = join12(stateDir, AGENT_STATE_FILE);
+    const stateFile = join13(stateDir, AGENT_STATE_FILE);
     try {
       const raw = readFileSync12(stateFile, "utf8").trim();
       const ageS = Math.round((Date.now() - statSync4(stateFile).mtimeMs) / 1000);
@@ -32386,7 +32386,7 @@ async function cmdPoke(configPath, opts = { brief: false }) {
       const { secretBytes } = loadSecretBytes(config2);
       client2 = buildClient(config2, secretBytes, roomEntry.token);
       const state = await client2.getState();
-      const cursorPath = join12(stateDir, "wake_cursor.json");
+      const cursorPath = join13(stateDir, "wake_cursor.json");
       let cursorNum = -1;
       if (existsSync9(cursorPath)) {
         try {
@@ -32409,9 +32409,9 @@ async function cmdPoke(configPath, opts = { brief: false }) {
 async function cmdExec(opts) {
   const resolvedWorkspace = resolveHome(opts.workspace);
   const resolvedStateDir = resolveHome(opts.stateDir);
-  const binDir = join12(resolvedStateDir, "shims");
-  const socketPath = join12(resolvedStateDir, "daemon.sock");
-  mkdirSync6(binDir, { recursive: true, mode: 448 });
+  const binDir = join13(resolvedStateDir, "shims");
+  const socketPath = join13(resolvedStateDir, "daemon.sock");
+  mkdirSync4(binDir, { recursive: true, mode: 448 });
   installShims(binDir, socketPath, resolvedWorkspace);
   const childEnv = buildExecEnv({
     binDir,
@@ -32435,7 +32435,7 @@ async function cmdExec(opts) {
   });
 }
 function cmdHooks(stateDir, runtime) {
-  const file = join12(stateDir, AGENT_STATE_FILE);
+  const file = join13(stateDir, AGENT_STATE_FILE);
   if (runtime === "omp") {
     process.stderr.write(`# Oh My Pi (omp) idle/busy hook. Save it, then launch the agent with --hook:
 ` + `#   meshl hooks --runtime omp --state-dir ${stateDir} > ~/mesh-agent/state-hook.ts

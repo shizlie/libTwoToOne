@@ -3,6 +3,33 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+## [1.28.1] — 2026-07-19
+
+### Fixed
+
+- `mesh ui` now elects one terminal-owned manager per OS user across every
+  profile and identity. Later invocations reuse the live broker through a
+  loopback-only, capability-authenticated relaunch route; explicit port
+  conflicts fail instead of starting a second manager.
+- Manager startup and stale-state recovery are deadline-bounded and
+  crash-safe: runtime ownership uses private exact-inode claims, a monotonic
+  three-second acquisition budget, fenced orphan cleanup, future-dated claim
+  observation after wall-clock rollback, and synchronous SIGINT/SIGTERM
+  cleanup before re-raising the signal.
+- Concurrent manager launches exchange independent one-time URL tokens with
+  monotonic expiry for one generation-specific broker-wide session cookie, so
+  opening a second tab no longer invalidates the first and a pre-singleton
+  `mesh_ui` session can coexist during an in-place upgrade.
+- Default `mesh open` output no longer prints a clipped credential-bearing
+  pseudo-link. It keeps the full private URL in the browser opener, renders
+  hostile room identifiers with terminal-safe escaping, and explains that
+  rerunning the same selector-preserving command with `--print` copies it.
+- Private runtime, identity, registry, room, and folder-lineage JSON files now
+  share one atomic writer with same-directory replacement and their existing
+  byte, permission, and parent-directory contracts preserved.
+
 ## [1.28.0] — 2026-07-18
 
 ### Added

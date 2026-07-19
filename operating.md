@@ -1298,18 +1298,20 @@ inventory the `mesh ui` sidebar renders.
 
 ## Local manager (`mesh ui`)
 
-`mesh ui [--port <n>] [--profile <name>] [--print] [--no-open]` starts a
-`node:http` broker bound to `127.0.0.1` and serves its same-origin manager SPA.
-The manager inventories every room membership in the machine registry, grouped
-by profile and identity, while showing one unmistakable acting identity at a
-time. `--profile` initially selects that profile's active membership, or its
-first membership when none is active; it never filters the machine-wide list.
+`mesh ui [--port <n>] [--profile <name>] [--print] [--no-open]` elects one
+terminal-owned manager per OS user. The first invocation starts a `node:http`
+broker bound to `127.0.0.1`; later invocations authenticate to that same broker,
+mint a fresh launch URL, open or print it as requested, and exit. The manager
+inventories every room membership in the machine registry, grouped by profile
+and identity, while showing one unmistakable acting identity at a time.
+`--profile` initially selects that profile's active membership, or its first
+membership when none is active; it never filters the machine-wide list.
 
 ```sh
-mesh ui                    # start on an ephemeral port and open the browser
-mesh ui --print            # print only the one-time launch URL; do not open a browser
+mesh ui                    # start or reopen the per-user manager and open the browser
+mesh ui --print            # print a fresh one-time launch URL; do not open a browser
 mesh ui --no-open          # print the listening address and launch URL; do not open a browser
-mesh ui --port 4123        # pin the port instead of choosing an ephemeral one
+mesh ui --port 4123        # choose the first manager's port; a live different port is an error
 mesh ui --profile work     # initially select work's active/first membership; keep every profile listed
 ```
 

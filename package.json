@@ -1,6 +1,6 @@
 {
   "name": "mesh",
-  "version": "1.28.0-89363381",
+  "version": "1.28.1-74999fec",
   "type": "module",
   "license": "MIT",
   "bin": { "mesh": "./mesh.mjs", "meshl": "./meshl.mjs" },

@@ -1305,7 +1305,7 @@ inventory the `mesh ui` sidebar renders.
 
 ## Local manager (`mesh ui`)
 
-`mesh ui [--port <n>] [--profile <name>] [--print] [--no-open]` elects one
+`mesh ui [--port <n>] [--profile <name>] [--print] [--no-open] [--status] [--stop] [--restart]` elects one
 terminal-owned manager per OS user. The first invocation starts a `node:http`
 broker bound to `127.0.0.1`; later invocations authenticate to that same broker,
 mint a fresh launch URL, open or print it as requested, and exit. The manager
@@ -1320,6 +1320,9 @@ mesh ui --print            # print a fresh one-time launch URL; do not open a br
 mesh ui --no-open          # print the listening address and launch URL; do not open a browser
 mesh ui --port 4123        # choose the first manager's port; a live different port is an error
 mesh ui --profile work     # initially select work's active/first membership; keep every profile listed
+mesh ui --status           # report manager state: stopped/starting/stale/running/unhealthy
+mesh ui --stop             # stop the one machine-wide manager (invalidates every connected tab)
+mesh ui --restart          # stop then start fresh; also reclaims stale (owner-exited) ownership
 ```
 
 The **Room** pane shows the selected membership's remote file tree, live
@@ -1351,12 +1354,19 @@ cookie checks guard the API.
 
 The terminal owns the broker; the browser owns its tabs. Stopping the owner
 does not close its tabs, and their in-memory session cannot survive a broker
-restart. Any API `401` therefore replaces the panes with a recovery page that
-states the manager may still be live: run `mesh ui`, use the tab it opens or
-refreshes, and, only if that authenticated tab also fails, stop the owner
-terminal with `Ctrl-C` and run `mesh ui` again. `mesh ui --print` is the
-fallback when the platform opener surfaces no authenticated tab. Because the
-broker listens only on loopback,
+restart. A tab that loses its session — a missing or rejected launch
+credential, an invalidated session, or an unreachable manager — replaces its
+panes with reason-specific recovery guidance instead of a bare "session
+ended" message; each tab also continuously polls `/api/health` every 3s
+once the room loads, pausing on `pagehide` and resuming after a BFCache
+`pageshow`. Every recovery page leads with `mesh ui --status` before
+anything destructive: if the manager reports live, mint a fresh single-use
+link with `mesh ui --no-open --print` and paste the complete URL (including
+its `#s=` fragment) into that tab; reach for `mesh ui --restart` (or `mesh
+ui --stop` for an intentional shutdown) only when status reports stopped or
+stale ownership, since stopping or restarting the one machine-wide manager
+invalidates every connected browser, screen, profile, and agent, not just
+the failing tab. Because the broker listens only on loopback,
 off-machine access is impossible. The one-time launch-token/session exchange
 protects localhost access; same-machine process or URL snooping is outside the
 current threat model.

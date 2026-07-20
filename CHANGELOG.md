@@ -5,6 +5,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.28.3] — 2026-07-20
+
+### Added
+
+- `mesh ui --status`, `--stop`, and `--restart` now expose explicit lifecycle
+  controls for the one machine-wide manager, with warnings that stop/restart
+  invalidate every connected browser, screen, profile, and agent.
+
+### Fixed
+
+- Manager tabs now probe broker health and replace stale workspace content with
+  reason-specific recovery guidance when credentials are missing, a session is
+  invalidated, or the loopback manager stops. Recovery commands distinguish
+  minting another single-use screen link from restarting the shared manager.
+- Manager shutdown now closes active loopback requests before releasing runtime
+  ownership, while status and restart safely identify a manager that exited
+  before publishing ready state without disturbing a live owner.
+
+
 ## [1.28.2] — 2026-07-20
 
 ### Changed

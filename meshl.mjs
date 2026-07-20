@@ -31697,7 +31697,7 @@ var COMMAND_SPEC = {
   log: { flags: ["f", "all"], max: 0, names: [] },
   chat: { flags: [], max: 0, names: [] },
   open: { flags: ["read-only", "print"], max: 0, names: [] },
-  ui: { flags: ["port", "profile", "print", "no-open"], max: 0, names: [] },
+  ui: { flags: ["port", "profile", "print", "no-open", "status", "stop", "restart"], max: 0, names: [] },
   post: { flags: ["body", "thread"], max: 1, names: ["body"] },
   announce: { flags: ["body", "verdict-by", "claim-window-s", "lease-ttl-s", "max-claim-s", "depends-on"], max: 1, names: ["task_ref"] },
   claim: { flags: ["body", "artifact"], max: 1, names: ["task_ref"] },
@@ -31798,7 +31798,7 @@ import { dirname as dirname5, resolve as resolve4 } from "node:path";
 import { fileURLToPath } from "node:url";
 function getVersion() {
   if (true)
-    return "1.28.2";
+    return "1.28.3";
   try {
     const here = dirname5(fileURLToPath(import.meta.url));
     return readFileSync11(resolve4(here, "../../../VERSION"), "utf8").trim();
